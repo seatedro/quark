@@ -146,6 +146,61 @@ fn picker_rows_emit_select_and_scroll() {
     assert_eq!(scrolls, vec![Action::from(Demo::Scroll(2))]);
 }
 
+struct Owned(String);
+
+impl PickerItem for Owned {
+    fn label(&self) -> &str {
+        &self.0
+    }
+    fn detail(&self) -> Option<&str> {
+        None
+    }
+}
+
+// Catches the picker building a row per entry (a 10,000-command palette
+// built every frame), and spacers that put the built rows somewhere other
+// than where the scroll offset says.
+#[test]
+fn picker_builds_only_rows_in_view_at_their_offsets() {
+    let theme = Theme::default_dark();
+    let items: Vec<Owned> = (0..10_000).map(|i| Owned(format!("item {i}"))).collect();
+    let row_h = theme.metrics.ui_row_height.round();
+    let gap = (quark_ui::design::Sp::XS * theme.metrics.ui_scale()).round();
+    let scroll = 5_000.0 * (row_h + gap);
+    let list = picker_list(
+        &items,
+        5_000,
+        scroll,
+        8,
+        &theme,
+        |i| Demo::Select(i).into(),
+        ScrollActionBuilder::new(|d| Demo::Scroll(d).into()),
+    );
+    let (mut router, _) = paint(list, None);
+    let rows: Vec<_> = router
+        .frame()
+        .semantic
+        .nodes()
+        .iter()
+        .filter(|n| {
+            n.test_id
+                .as_ref()
+                .is_some_and(|t| t.as_str() == "picker-row")
+        })
+        .map(|n| (n.label.clone().unwrap_or_default(), n.bounds))
+        .collect();
+    assert!(rows.len() <= 16, "built {} rows", rows.len());
+    let (_, top) = rows
+        .iter()
+        .find(|(label, _)| &**label == "item 5000")
+        .expect("the row scrolled to is built");
+    assert_eq!(top.y, 0.0);
+    let clicked = router
+        .pointer_down(top.x + top.width / 2.0, top.y + top.height / 2.0, &mut None)
+        .actions;
+    assert_eq!(clicked, [Action::from(Demo::Select(5_000))]);
+}
+
 #[test]
 fn toast_emits_on_dismiss_with_index() {
     let toasts = [Toast {

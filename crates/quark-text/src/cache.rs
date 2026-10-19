@@ -35,6 +35,7 @@ impl LayoutKey {
         attrs.write_u32(style.letter_spacing.to_bits());
         attrs.write_u8(u8::from(style.thicken));
         style.linear_correction.hash(&mut attrs);
+        attrs.write_u32(style.hanging_indent.to_bits());
         attrs.write_usize(params.spans.len());
         for span in params.spans.iter() {
             attrs.write_usize(span.range.start);
@@ -246,6 +247,14 @@ pub struct LayoutCacheMemory {
 /// Default [`LayoutCache`] entry cap.
 const DEFAULT_MAX_ENTRIES: usize = 8192;
 
+/// Whether misses run the O(entries) cache walk: debug builds with the
+/// `integrity-checks` feature, and this crate's tests. Without it a debug
+/// build with thousands of cached rows would walk them all on every miss.
+const FULL_INTEGRITY_CHECKS: bool = cfg!(all(
+    debug_assertions,
+    any(test, feature = "integrity-checks")
+));
+
 impl LayoutCache {
     pub fn new(max_idle_frames: u64) -> Self {
         let limits = LayoutCacheLimits::default();
@@ -282,7 +291,9 @@ impl LayoutCache {
         self.evict_at = limits.history_bytes;
         self.pool.set_max_free_bytes(limits.spare_bytes);
         self.evict_past_limits();
-        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        if FULL_INTEGRITY_CHECKS {
+            debug_assert_eq!(self.verify_integrity(), Ok(()));
+        }
         self
     }
 
@@ -448,7 +459,9 @@ impl LayoutCache {
             older: NIL,
         });
         self.evict_past_limits();
-        debug_assert_eq!(self.verify_integrity(), Ok(()));
+        if FULL_INTEGRITY_CHECKS {
+            debug_assert_eq!(self.verify_integrity(), Ok(()));
+        }
         Ok(layout)
     }
 
@@ -804,6 +817,10 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &again));
         let wide = cache.layout(&mut sys, &params(300.0)).expect("layout");
         assert!(!Arc::ptr_eq(&first, &wide));
+        let mut indented = params(150.0);
+        indented.style = indented.style.hanging_indent(20.0);
+        let indented = cache.layout(&mut sys, &indented).expect("layout");
+        assert!(!Arc::ptr_eq(&first, &indented));
     }
 
     #[test]

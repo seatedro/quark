@@ -12,7 +12,9 @@ use quark::ClickEvent;
 
 use super::TextEditCommand;
 use super::view::ClickCounter;
-use crate::element::{CursorHint, DragHandler, DragReleaseResult, DragStart, TextInputHitArea};
+use crate::element::{
+    CursorHint, DragHandler, DragReleaseResult, DragStart, Mods, TextInputHitArea,
+};
 use crate::{Action, FocusId};
 
 /// How often a pointer held past a field's edge extends the selection.
@@ -59,12 +61,12 @@ impl DragHandler for TextDrag {
             .collect()
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         let target = self.target;
         vec![Action::new(TextPointerEvent::Drag { target, x, y })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         let target = self.target;
         DragReleaseResult {
             actions: vec![Action::new(TextPointerEvent::Release { target })],
@@ -73,7 +75,7 @@ impl DragHandler for TextDrag {
 
     /// The selection made so far stays; the release only stops autoscroll.
     fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release().actions
+        self.on_release(Mods::default()).actions
     }
 
     fn cursor(&self) -> CursorHint {

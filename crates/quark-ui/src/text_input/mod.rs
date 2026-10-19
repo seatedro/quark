@@ -54,8 +54,8 @@ pub use hooks::{InputHooks, Insertion, NoHooks};
 pub use trigger::{TriggerBoundary, TriggerMatch, TriggerRule, find_trigger};
 
 pub use editor::{
-    CursorState, Editor, EditorMode, SelectionRect, SpellingIssue, SyntaxHighlighter, SyntaxSpan,
-    SyntaxTokenKind, TextDecoration,
+    CursorState, Editor, EditorMode, SelectionRect, SpellingIssue, StyleHighlighter,
+    SyntaxHighlighter, SyntaxSpan, SyntaxTokenKind, TextDecoration,
 };
 pub use ime::{Composition, Preedit, compose};
 pub use input_element::{CursorSnapshot, TextEditorElement, text_editor_element};

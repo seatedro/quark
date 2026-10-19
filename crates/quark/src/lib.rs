@@ -80,7 +80,7 @@ pub use event::{UiEventBinding, UiEventKind, UiEventPhase, UiEventPropagation, U
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
 pub use geometry::Rect;
 pub use hit::{
-    ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitSpace, HitTable,
+    ClickEvent, CursorHint, EMPTY_CLIP, HitFlags, HitId, HitIdentity, HitSpace, HitTable, Mods,
     TooltipRegion, UNCLIPPED,
 };
 pub use identity::{TestId, UiKey, UiNodeId, intern, stable_hash};

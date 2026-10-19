@@ -30,7 +30,7 @@ use crate::design::Alpha;
 use crate::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CodeBlock, CodeHeader, DragHandler,
     DragReleaseResult, DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId,
-    LineHeight, LinkClicked, LinkHandler, ParagraphStyle, ScrollActionBuilder, ScrollAxes,
+    LineHeight, LinkClicked, LinkHandler, Mods, ParagraphStyle, ScrollActionBuilder, ScrollAxes,
     ScrollHandle, ScrollSink, ScrollbarInput, Scrollbars, StyledSpan, cached, code_block_joined,
     div, inputs_hash, selectable_rich_text, svg_icon, text,
 };
@@ -1726,12 +1726,12 @@ impl DragHandler for SelectDrag {
         vec![(self.on_event)(DocumentEvent::PointerDown { x, y })]
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         let (x, y) = self.local(x, y);
         vec![(self.on_event)(DocumentEvent::PointerDrag { x, y })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.on_event)(DocumentEvent::PointerUp)],
         }
@@ -1739,7 +1739,7 @@ impl DragHandler for SelectDrag {
 
     /// The selection made so far stays; the release only ends the drag.
     fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release().actions
+        self.on_release(Mods::default()).actions
     }
 
     fn cursor(&self) -> CursorHint {

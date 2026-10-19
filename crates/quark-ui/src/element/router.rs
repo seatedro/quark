@@ -14,17 +14,7 @@ use super::*;
 /// lines; [`InputRouter::wheel`] converts pixel deltas with this.
 pub const WHEEL_LINE_PX: f32 = 20.0;
 
-/// Modifier keys of a [`Binding`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Mods {
-    pub cmd: bool,
-    pub ctrl: bool,
-    pub alt: bool,
-    pub shift: bool,
-    /// `mod` in binding strings: either Cmd or Ctrl. Only patterns set it;
-    /// a pressed key reports the concrete modifier.
-    pub primary: bool,
-}
+pub use quark::hit::Mods;
 
 /// One key with its modifiers, such as `mod+shift+p` or `escape`. Parse
 /// one from the keymap format with [`str::parse`]; it prints back in that
@@ -482,14 +472,19 @@ impl InputHandlers {
         self.drag.get(i)
     }
 
-    /// The drag a press at `(x, y)` on `node` starts, if it has one.
-    fn start_drag(&self, node: usize, x: f32, y: f32) -> Option<Box<dyn DragHandler>> {
+    /// The drag `press` on `node` starts, if it has one.
+    fn start_drag(&self, node: usize, press: ClickEvent) -> Option<Box<dyn DragHandler>> {
         if let Some(start) = self.drag(node) {
-            return Some(start.start(ClickEvent { x, y }));
+            return Some(start.start(press));
         }
         let i = self.scrollbar_node.iter().position(|n| *n == node)?;
         let (bar, sink) = self.scrollbar.get(i)?;
-        Some(Box::new(ScrollbarDrag::new(*bar, sink.clone(), x, y)))
+        Some(Box::new(ScrollbarDrag::new(
+            *bar,
+            sink.clone(),
+            press.x,
+            press.y,
+        )))
     }
 
     fn axis_target(&self, node: usize, axis: Axis) -> Option<AxisTarget<'_>> {
@@ -594,9 +589,18 @@ pub struct InputRouter {
     wheel_handle: Option<ScrollHandle>,
     /// Identity of the node a middle press landed on, until its release.
     middle_press: Option<u64>,
+    /// The modifier keys held now, for clicks and drags.
+    modifiers: Mods,
 }
 
 impl InputRouter {
+    /// The modifier keys held from now on: clicks and drags report them
+    /// ([`ClickEvent::modifiers`], [`DragHandler::on_move`]). Hosts call
+    /// this as the keyboard's modifier state changes.
+    pub fn set_modifiers(&mut self, modifiers: Mods) {
+        self.modifiers = modifiers;
+    }
+
     pub fn set_frame(&mut self, frame: InputFrame) {
         frame.semantic.fill_focus_tree(&mut self.focus_tree);
         self.frame = frame;
@@ -683,8 +687,13 @@ impl InputRouter {
             .then(Vec::new)
         });
         let epoch = scroll_epoch();
+        let press = ClickEvent {
+            x,
+            y,
+            modifiers: self.modifiers,
+        };
         if let Some(node) = drag.node
-            && let Some(mut drag) = handlers.start_drag(node, x, y)
+            && let Some(mut drag) = handlers.start_drag(node, press)
         {
             drag.set_geometry(&self.frame.geometry);
             let actions = drag.on_press();
@@ -704,9 +713,7 @@ impl InputRouter {
             };
         }
         let mut delivery = self.walk(target, UiEventKind::Click, |node| {
-            handlers
-                .click(node)
-                .map(|handler| handler.invoke(ClickEvent { x, y }))
+            handlers.click(node).map(|handler| handler.invoke(press))
         });
         delivery.window_drag = delivery.node.is_none() && self.frame.hits.window_drag_at(x, y);
         delivery
@@ -821,7 +828,7 @@ impl InputRouter {
                 capture.moved |= dx.hypot(dy) >= DRAG_PREVIEW_THRESHOLD;
                 Delivery {
                     node: capture.node,
-                    actions: capture.drag.on_move(x, y),
+                    actions: capture.drag.on_move(x, y, self.modifiers),
                     redraw: scroll_epoch() != epoch || capture.shows_preview(),
                     window_drag: false,
                 }
@@ -836,7 +843,7 @@ impl InputRouter {
         match self.capture.take() {
             Some(mut capture) => Delivery {
                 node: capture.node,
-                actions: capture.drag.on_release().actions,
+                actions: capture.drag.on_release(self.modifiers).actions,
                 redraw: scroll_epoch() != epoch || capture.shows_preview(),
                 window_drag: false,
             },
@@ -1093,10 +1100,7 @@ impl InputRouter {
         let b = target.bounds;
         Delivery {
             node: Some(node),
-            actions: handler.invoke(ClickEvent {
-                x: b.x + b.width / 2.0,
-                y: b.y + b.height / 2.0,
-            }),
+            actions: handler.invoke(ClickEvent::at(b.x + b.width / 2.0, b.y + b.height / 2.0)),
             redraw: false,
             window_drag: false,
         }
@@ -1466,11 +1470,11 @@ mod tests {
     struct RecordDrag;
 
     impl DragHandler for RecordDrag {
-        fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+        fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
             vec![Msg::Move(x as i32, y as i32).into()]
         }
 
-        fn on_release(&mut self) -> DragReleaseResult {
+        fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
             DragReleaseResult {
                 actions: vec![Msg::Release.into()],
             }
@@ -1501,6 +1505,84 @@ mod tests {
         assert_eq!(
             [moved, released],
             ["handle [Move(300, 300)]", "handle [Release]"]
+        );
+    }
+
+    // Clicks and drags report the modifiers held at each step, so a
+    // shift-click or an alt-drop needs no side channel.
+    #[test]
+    fn clicks_and_drags_report_held_modifiers() {
+        struct ModsDrag;
+        fn name(m: Mods) -> &'static str {
+            match (m.shift, m.alt) {
+                (true, _) => "shift",
+                (_, true) => "alt",
+                _ => "none",
+            }
+        }
+        impl DragHandler for ModsDrag {
+            fn on_move(&mut self, _x: f32, _y: f32, modifiers: Mods) -> Vec<Action> {
+                vec![Msg::Click(name(modifiers)).into()]
+            }
+
+            fn on_release(&mut self, modifiers: Mods) -> DragReleaseResult {
+                DragReleaseResult {
+                    actions: vec![Msg::Click(name(modifiers)).into()],
+                }
+            }
+
+            fn on_cancel(&mut self) -> Vec<Action> {
+                Vec::new()
+            }
+        }
+        let root = div()
+            .w(400.0)
+            .h(400.0)
+            .flex_row()
+            .child(
+                div()
+                    .w(50.0)
+                    .h(50.0)
+                    .test_id("button")
+                    .on_click_handler(ClickHandler::new(|e| {
+                        vec![Msg::Click(name(e.modifiers)).into()]
+                    })),
+            )
+            .child(
+                div()
+                    .w(50.0)
+                    .h(50.0)
+                    .test_id("handle")
+                    .on_drag(|_| Box::new(ModsDrag)),
+            );
+        let mut router = routed(root, 400.0, 400.0);
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+
+        router.set_modifiers(shift);
+        let clicked = router.pointer_down(10.0, 10.0, &mut None);
+        let clicked = dump(&router, clicked);
+        router.pointer_up();
+        router.pointer_down(60.0, 10.0, &mut None);
+        let moved = router.pointer_move(100.0, 10.0);
+        let moved = dump(&router, moved);
+        router.set_modifiers(alt);
+        let released = router.pointer_up();
+        let released = dump(&router, released);
+
+        assert_eq!(
+            [clicked, moved, released],
+            [
+                "button [Click(\"shift\")]",
+                "handle [Click(\"shift\")]",
+                "handle [Click(\"alt\")]"
+            ]
         );
     }
 
@@ -1558,12 +1640,12 @@ mod tests {
     struct TearDrag;
 
     impl DragHandler for TearDrag {
-        fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
-            RecordDrag.on_move(x, y)
+        fn on_move(&mut self, x: f32, y: f32, modifiers: Mods) -> Vec<Action> {
+            RecordDrag.on_move(x, y, modifiers)
         }
 
-        fn on_release(&mut self) -> DragReleaseResult {
-            RecordDrag.on_release()
+        fn on_release(&mut self, modifiers: Mods) -> DragReleaseResult {
+            RecordDrag.on_release(modifiers)
         }
 
         fn on_cancel(&mut self) -> Vec<Action> {

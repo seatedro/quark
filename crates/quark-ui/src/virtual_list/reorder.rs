@@ -23,7 +23,7 @@
 use std::rc::Rc;
 
 use crate::Action;
-use crate::element::{ClickEvent, CursorHint, DragHandler, DragReleaseResult};
+use crate::element::{ClickEvent, CursorHint, DragHandler, DragReleaseResult, Mods};
 
 use super::RowTable;
 
@@ -352,13 +352,13 @@ impl DragHandler for RowDrag {
         vec![(self.wrap)(ReorderMsg::Press { index: self.index })]
     }
 
-    fn on_move(&mut self, _x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, _x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         vec![(self.wrap)(ReorderMsg::Move {
             dy: y - self.press.y,
         })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.wrap)(ReorderMsg::Release)],
         }
@@ -412,17 +412,18 @@ mod tests {
     #[test]
     fn cancelling_a_drag_moves_no_row() {
         let mut reorder = Reorder::new();
-        let mut drag = Reorder::drag_start(2, crate::Action::new)(ClickEvent { x: 10.0, y: 100.0 });
+        let mut drag = Reorder::drag_start(2, crate::Action::new)(ClickEvent::at(10.0, 100.0));
         let msgs = |actions: Vec<Action>| -> Vec<ReorderMsg> {
             actions
                 .iter()
                 .map(|a| *a.downcast_ref::<ReorderMsg>().unwrap())
                 .collect()
         };
-        for msg in msgs(drag.on_press())
-            .into_iter()
-            .chain(msgs(drag.on_move(10.0, 190.0)))
-        {
+        for msg in msgs(drag.on_press()).into_iter().chain(msgs(drag.on_move(
+            10.0,
+            190.0,
+            Mods::default(),
+        ))) {
             reorder.update(msg, &ROWS, 0.0);
         }
         let held = reorder.drop_indicator(&ROWS);

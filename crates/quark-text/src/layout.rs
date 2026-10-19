@@ -109,6 +109,12 @@ pub struct TextStyle {
     /// Linear blending, the default, draws dark text on light backgrounds
     /// thinner and light text on dark ones heavier.
     pub linear_correction: Option<u8>,
+    /// How far right (left, in a right-to-left paragraph) every wrapped
+    /// line of a paragraph starts, in logical pixels: its first line starts
+    /// at zero, and the lines it wraps onto start here and wrap that much
+    /// sooner. A diff's code or a list item's text lines up past its marker
+    /// this way. Unwrapped layout has no wrapped lines, so ignores it.
+    pub hanging_indent: f32,
 }
 
 impl TextStyle {
@@ -122,6 +128,7 @@ impl TextStyle {
             letter_spacing: 0.0,
             thicken: false,
             linear_correction: None,
+            hanging_indent: 0.0,
         }
     }
 
@@ -170,6 +177,12 @@ impl TextStyle {
 
     pub fn linear_correction(mut self, background_luminance: Option<u8>) -> Self {
         self.linear_correction = background_luminance;
+        self
+    }
+
+    /// See [`Self::hanging_indent`](field@Self::hanging_indent).
+    pub fn hanging_indent(mut self, indent: f32) -> Self {
+        self.hanging_indent = indent;
         self
     }
 }
@@ -480,13 +493,14 @@ struct Run {
 /// cluster wider than the wrap overflows a line, a wider buffer would let
 /// other lines take more words, so the layout keeps the wrap width and is
 /// shifted right instead, by the most any RTL line overflows it.
-fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) -> f32 {
+///
+/// A wrapped line counts its hanging `indent` (physical pixels) as part of
+/// its width, so relaying out at the widest leaves it the same room.
+fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer, indent: f32) -> f32 {
     if !buffer.layout_runs().any(|run| run.rtl) {
         return 0.0;
     }
-    let w = buffer
-        .layout_runs()
-        .fold(0.0_f32, |widest, run| widest.max(run.line_w));
+    let w = indented_widths(buffer, indent).fold(0.0_f32, |widest, (_, w)| widest.max(w));
     if buffer.size().0.is_none_or(|wrap| w <= wrap) {
         buffer.set_size(fs, Some(w), None);
         for line_i in 0..buffer.lines.len() {
@@ -495,10 +509,19 @@ fn fit_rtl_lines(fs: &mut FontSystem, buffer: &mut Buffer) -> f32 {
     }
     // Every RTL paragraph now aligns its lines' right edges to this width.
     let align = buffer.size().0.unwrap_or(w);
-    buffer
-        .layout_runs()
-        .filter(|run| run.rtl)
-        .fold(0.0_f32, |shift, run| shift.max(run.line_w - align))
+    indented_widths(buffer, indent)
+        .filter(|&(rtl, _)| rtl)
+        .fold(0.0_f32, |shift, (_, w)| shift.max(w - align))
+}
+
+/// Each laid-out row's direction and width, a wrapped row's hanging
+/// `indent` included.
+fn indented_widths(buffer: &Buffer, indent: f32) -> impl Iterator<Item = (bool, f32)> + '_ {
+    let mut paragraph = None;
+    buffer.layout_runs().map(move |run| {
+        let wrapped = paragraph.replace(run.line_i) == Some(run.line_i);
+        (run.rtl, run.line_w + if wrapped { indent } else { 0.0 })
+    })
 }
 
 /// Immutable result of shaping + layout, shared via `Arc` by measurement,
@@ -705,6 +728,11 @@ impl TextLayout {
         let style = self.style;
         let scale = self.scale_factor;
         let wrap = self.wrap_width.map(|w| (w * scale).max(1.0));
+        // Physical; at most the wrap width less a pixel, so a wrapped line
+        // keeps some room. Only wrapped lines are indented.
+        let indent = wrap.map_or(0.0, |w| {
+            (style.hanging_indent * scale).max(0.0).min(w - 1.0)
+        });
         let Self {
             buffer,
             spare_lines,
@@ -783,6 +811,7 @@ impl TextLayout {
                 keep_ranges(spans, range, &mut scratch.keep);
             }
             buffer.lines[line_i].set_keep_together_ranges(&scratch.keep);
+            buffer.lines[line_i].set_hanging_indent(indent);
             if let Some(shape) = scratch.shapes.pop()
                 && let Some(unused) = buffer.lines[line_i].lend_shape_storage(shape)
             {
@@ -800,7 +829,7 @@ impl TextLayout {
         for line_i in 0..buffer.lines.len() {
             buffer.line_layout(fs, line_i);
         }
-        let buffer_x = fit_rtl_lines(fs, buffer);
+        let buffer_x = fit_rtl_lines(fs, buffer, indent);
 
         let inv = 1.0 / scale;
         let line_paragraph = &mut scratch.line_paragraph;
@@ -865,7 +894,8 @@ impl TextLayout {
             // RTL lines end at the shifted buffer's right edge, which is the
             // widest RTL line's own; LTR lines start at the shift.
             let shift = if run.rtl { 0.0 } else { buffer_x };
-            width = width.max((shift + run.line_w) * inv);
+            let wrapped = if first_of_paragraph { 0.0 } else { indent };
+            width = width.max((shift + wrapped + run.line_w) * inv);
             height = height.max((run.line_top + run.line_height) * inv);
             if let Some(last) = lines.last_mut().filter(|_| continuation) {
                 last.glyph_end = glyphs.len() as u32;
@@ -1074,7 +1104,8 @@ impl TextLayout {
 
     /// Logical width of the widest piece of text between two line break
     /// opportunities (UAX #14, where wrapping breaks first), without its
-    /// trailing spaces: the narrowest wrap width that splits no word. Below
+    /// trailing spaces, plus the hanging indent when there is more than one
+    /// piece to wrap: the narrowest wrap width that splits no word. Below
     /// it, wrapping falls back to breaking between glyphs.
     pub fn min_content_width(&self) -> f32 {
         let text = self.text();
@@ -1104,7 +1135,12 @@ impl TextLayout {
                 *width += glyph.advance;
             }
         }
-        segments.iter().fold(0.0, |widest, s| widest.max(s.2))
+        let indent = if segments.len() > 1 {
+            self.style.hanging_indent.max(0.0)
+        } else {
+            0.0
+        };
+        segments.iter().fold(0.0_f32, |widest, s| widest.max(s.2)) + indent
     }
 
     pub fn spans(&self) -> &[TextSpan] {
@@ -2135,6 +2171,87 @@ mod tests {
             let line_height = 14.0 * DEFAULT_LINE_HEIGHT_FACTOR;
             assert!((h - line_height * wrapped.line_count() as f32).abs() < 0.5);
         }
+    }
+
+    fn indented(text: &str, wrap: Option<f32>, indent: f32) -> TextLayout {
+        let style = TextStyle::new(14.0).hanging_indent(indent);
+        let params = TextParams::new(text, style).wrap_width(wrap);
+        test_system().layout(&params).expect("layout")
+    }
+
+    /// Each line's visual left and right edges.
+    fn line_edges(layout: &TextLayout) -> Vec<(f32, f32)> {
+        let g = layout.glyphs();
+        (layout.lines())
+            .map(|line| {
+                g[line.glyph_range]
+                    .iter()
+                    .fold((f32::INFINITY, 0.0_f32), |(l, r), g| {
+                        (l.min(g.x), r.max(g.x + g.advance))
+                    })
+            })
+            .collect()
+    }
+
+    // A diff or list row lines its wrapped text up past its marker: the
+    // wrapped lines of each paragraph start at the indent and stay within
+    // the wrap width, while each paragraph's first line starts at zero.
+    #[test]
+    fn hanging_indent_starts_only_wrapped_lines_at_the_indent() {
+        let text = format!("{LOREM}\n{LOREM}");
+        let (wrap, indent) = (200.0, 24.0);
+        let layout = indented(&text, Some(wrap), indent);
+        assert!(layout.line_count() > 4, "both paragraphs wrap");
+        let second = text.find('\n').expect("break") + 1;
+        for (line, (left, right)) in layout.lines().zip(line_edges(&layout)) {
+            let first = line.byte_range.start == 0 || line.byte_range.start == second;
+            let start = if first { 0.0 } else { indent };
+            assert!((left - start).abs() < 0.5, "{line:?} starts at {left}");
+            assert!(right <= wrap + 0.5, "{line:?} ends at {right}");
+        }
+        assert!(layout.size().0 <= wrap + 0.5);
+    }
+
+    #[test]
+    fn hanging_indent_moves_hits_and_carets_on_wrapped_lines() {
+        let indent = 30.0;
+        let layout = indented(LOREM, Some(200.0), indent);
+        let line = layout.line(1).expect("a wrapped line");
+        let caret = layout.caret(line.byte_range.start);
+        assert_eq!(caret.line, 1);
+        assert!((caret.x - indent).abs() < 0.5, "caret at {}", caret.x);
+        let y = line.top + line.height / 2.0;
+        // Inside the indent is left of the line's text: its start.
+        assert_eq!(layout.hit(indent / 2.0, y).get(), line.byte_range.start);
+        for g in &layout.glyphs()[line.glyph_range] {
+            let hit = layout.hit(g.x + g.advance * 0.25, y).get();
+            assert_eq!(hit, g.byte_start as usize, "glyph at {}", g.x);
+        }
+    }
+
+    // Right-to-left paragraphs indent from the right. Fitting the buffer to
+    // its widest line must count the indent, or wrapped lines rewrap.
+    #[test]
+    fn hanging_indent_starts_wrapped_rtl_lines_in_from_the_right() {
+        let word = "\u{5e9}\u{5dc}\u{5d5}\u{5dd} \u{5e2}\u{5d5}\u{5dc}\u{5dd} ";
+        let text = word.repeat(6);
+        let indent = 20.0;
+        let layout = indented(&text, Some(150.0), indent);
+        assert!(layout.line_count() > 1);
+        let width = layout.size().0;
+        for (i, (_, right)) in line_edges(&layout).into_iter().enumerate() {
+            let end = if i == 0 { width } else { width - indent };
+            assert!(
+                (right - end).abs() < 0.5,
+                "line {i} ends at {right}, not {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn hanging_indent_is_ignored_without_wrapping() {
+        let plain = layout(LOREM, None);
+        assert_eq!(dump(&indented(LOREM, None, 40.0)), dump(&plain));
     }
 
     // Catches inline code broken at its spaces: a kept run that fits on a

@@ -683,6 +683,54 @@ pub trait Styled: Sized {
         self
     }
 
+    // Margins take any sign: a negative margin pulls the box outward, as in CSS.
+
+    fn m(mut self, v: f32) -> Self {
+        let l = taffy::LengthPercentageAuto::length(v);
+        self.element_style_mut().layout.margin = taffy::Rect {
+            left: l,
+            right: l,
+            top: l,
+            bottom: l,
+        };
+        self
+    }
+
+    fn mx(mut self, v: f32) -> Self {
+        let l = taffy::LengthPercentageAuto::length(v);
+        let m = &mut self.element_style_mut().layout.margin;
+        m.left = l;
+        m.right = l;
+        self
+    }
+
+    fn my(mut self, v: f32) -> Self {
+        let l = taffy::LengthPercentageAuto::length(v);
+        let m = &mut self.element_style_mut().layout.margin;
+        m.top = l;
+        m.bottom = l;
+        self
+    }
+
+    fn mt(mut self, v: f32) -> Self {
+        self.element_style_mut().layout.margin.top = taffy::LengthPercentageAuto::length(v);
+        self
+    }
+
+    fn mr(mut self, v: f32) -> Self {
+        self.element_style_mut().layout.margin.right = taffy::LengthPercentageAuto::length(v);
+        self
+    }
+
+    fn mb(mut self, v: f32) -> Self {
+        self.element_style_mut().layout.margin.bottom = taffy::LengthPercentageAuto::length(v);
+        self
+    }
+
+    fn ml(self, v: f32) -> Self {
+        self.margin_left(v)
+    }
+
     fn size(mut self, v: f32) -> Self {
         let l = &mut self.element_style_mut().layout;
         l.size.width = taffy::Dimension::length(v);

@@ -47,7 +47,7 @@ use quark_ui::design::{Shadow, Sz};
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, CursorHint, DRAG_PREVIEW_THRESHOLD, DragHandler, DragHandoff,
     DragPreview, DragReleaseResult, DropTarget, DropTargetHit, DropTargetId, ElementGeometry,
-    ElementHandle, IntoAnyElement, LayoutSnapshot, cached, canvas, div, svg_icon, text,
+    ElementHandle, IntoAnyElement, LayoutSnapshot, Mods, cached, canvas, div, svg_icon, text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -2797,7 +2797,7 @@ impl DragHandler for TabDrag {
         })]
     }
 
-    fn on_move(&mut self, wx: f32, wy: f32) -> Vec<Action> {
+    fn on_move(&mut self, wx: f32, wy: f32, _modifiers: Mods) -> Vec<Action> {
         let out = drag_out(
             &self.map,
             &mut self.out,
@@ -2810,7 +2810,7 @@ impl DragHandler for TabDrag {
         actions
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.map)(DockEvent::TabDrop {
                 panel: self.panel,
@@ -2911,7 +2911,7 @@ impl DragHandler for GroupDrag {
         self.dock = self.ctx.root.find(geometry);
     }
 
-    fn on_move(&mut self, wx: f32, wy: f32) -> Vec<Action> {
+    fn on_move(&mut self, wx: f32, wy: f32, _modifiers: Mods) -> Vec<Action> {
         let payload = self.payload();
         let out = drag_out(&self.map, &mut self.out, self.press, (wx, wy), payload);
         let (x, y) = self
@@ -2936,7 +2936,7 @@ impl DragHandler for GroupDrag {
         actions
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         let mut actions = vec![self.hover(None)];
         if let Some(destination) = self.target {
             actions.push((self.map)(DockEvent::Transfer {
@@ -2993,7 +2993,7 @@ impl DragHandler for PaneDividerDrag {
         vec![self.event(PaneDividerEvent::Press)]
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         let at = if self.horizontal { x } else { y };
         vec![self.event(PaneDividerEvent::Drag {
             delta: at - self.origin,
@@ -3001,7 +3001,7 @@ impl DragHandler for PaneDividerDrag {
         })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![self.event(PaneDividerEvent::Release)],
         }
@@ -3010,7 +3010,7 @@ impl DragHandler for PaneDividerDrag {
     /// The panes follow the pointer as it moves, so cancelling keeps the
     /// weights dragged to, like a release.
     fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release().actions
+        self.on_release(Mods::default()).actions
     }
 
     fn cursor(&self) -> CursorHint {

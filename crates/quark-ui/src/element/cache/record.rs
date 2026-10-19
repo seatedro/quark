@@ -25,6 +25,7 @@ struct PaintState {
     text_color: Option<Color>,
     icon_color: Option<Color>,
     text_hidden: bool,
+    a11y_hidden: bool,
 }
 
 impl PaintState {
@@ -33,6 +34,7 @@ impl PaintState {
             text_color: cx.text_color_override(),
             icon_color: cx.icon_color_override(),
             text_hidden: cx.accessibility_text_hidden(),
+            a11y_hidden: cx.accessibility_hidden(),
         }
     }
 }

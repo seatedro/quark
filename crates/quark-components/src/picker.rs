@@ -6,7 +6,10 @@ use quark_ui::element::CursorHint;
 use quark_ui::element::*;
 use quark_ui::style::Styled;
 use quark_ui::theme::{Color, Theme, ThemeColors};
-use quark_ui::virtual_list::virtual_list_total_extent;
+use quark_ui::virtual_list::{virtual_list_total_extent, virtual_list_window};
+
+/// Rows built past each edge of the view.
+const OVERSCAN: usize = 2;
 
 /// A row the picker can show. Only `label` and `detail` are required.
 pub trait PickerItem {
@@ -60,6 +63,14 @@ pub fn picker_list<T: PickerItem>(
     let list_h = virtual_list_total_extent(visible_count, row_h, gap);
     let total_h = virtual_list_total_extent(entries.len(), row_h, gap);
     let scroll = scroll_top_px.min((total_h - list_h).max(0.0));
+    // Build only the rows in view; spacers stand in for the rest. The
+    // column's gap also follows the top spacer, so that spacer leaves out
+    // the gap before the first built row.
+    let window = virtual_list_window(entries.len(), scroll, list_h, row_h, gap, OVERSCAN);
+    let top_spacer = (window.top_spacer - gap).max(0.0);
+    let bottom_spacer = window.bottom_spacer;
+    let first = window.range.start;
+    let rows = window.range.clone().zip(&entries[window.range]);
 
     view! { scale,
         <div
@@ -77,9 +88,12 @@ pub fn picker_list<T: PickerItem>(
             on_scroll={on_scroll}
             hide_scrollbar
         >
-            for (i, entry) in entries.iter().enumerate() {
+            if first > 0 {
+                <div class="w-full shrink-0" h={top_spacer} />
+            }
+            for (i, entry) in rows {
                 if entry.is_section_header() {
-                    <div class="w-full flex-row items-center" h={row_h} px={Sp::MD}>
+                    <div class="w-full shrink-0 flex-row items-center" h={row_h} px={Sp::MD}>
                         <text class="text-xs truncate" color={tc.text_muted}>{entry.label()}</text>
                     </div>
                 } else {
@@ -93,6 +107,9 @@ pub fn picker_list<T: PickerItem>(
                         on_select(i)
                     )}
                 }
+            }
+            if bottom_spacer > 0.0 {
+                <div class="w-full shrink-0" h={bottom_spacer} />
             }
         </div>
     }

@@ -8,11 +8,26 @@ use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
 
+/// A search box around `input`: a clear button while it has a value, else
+/// `shortcut_hint` as a [`kbd`](super::kbd) keycap. For another hint (two
+/// keycaps, an icon), use [`search_field_with_hint`].
 pub fn search_field(
     input: impl IntoAnyElement,
     has_value: bool,
     on_clear: Option<Action>,
     shortcut_hint: Option<&str>,
+    theme: &Theme,
+) -> AnyElement {
+    let hint = shortcut_hint.map(|hint| super::kbd(hint, theme));
+    search_field_with_hint(input, has_value, on_clear, hint, theme)
+}
+
+/// [`search_field`] with any element as the hint shown while it is empty.
+pub fn search_field_with_hint(
+    input: impl IntoAnyElement,
+    has_value: bool,
+    on_clear: Option<Action>,
+    hint: Option<AnyElement>,
     theme: &Theme,
 ) -> AnyElement {
     let tc = &theme.colors;
@@ -30,7 +45,7 @@ pub fn search_field(
             }
         })
     } else {
-        shortcut_hint.map(|hint| super::kbd(hint, theme).into_any())
+        hint
     };
 
     view! {

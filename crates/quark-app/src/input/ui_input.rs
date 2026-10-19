@@ -4,6 +4,7 @@
 
 use quark_ui::element::{Binding, Mods, WHEEL_LINE_PX};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
+use winit::keyboard::ModifiersState;
 
 use super::{InputEvent, KeyChord, scroll_delta_to_px};
 
@@ -101,14 +102,19 @@ impl KeyChord {
     /// an uppercase N. `None` for keys without a binding name.
     pub fn binding(&self) -> Option<Binding> {
         let (key, inferred_shift) = super::binding_key(&self.logical)?;
-        let modifiers = self.modifiers;
-        let mods = Mods {
-            cmd: modifiers.super_key(),
-            ctrl: modifiers.control_key(),
-            alt: modifiers.alt_key(),
-            shift: modifiers.shift_key() || inferred_shift,
-            primary: false,
-        };
+        let mut mods = mods_of(self.modifiers);
+        mods.shift |= inferred_shift;
         Some(Binding::new(mods, key))
+    }
+}
+
+/// The modifier keys `modifiers` holds, as the element tree sees them.
+pub fn mods_of(modifiers: ModifiersState) -> Mods {
+    Mods {
+        cmd: modifiers.super_key(),
+        ctrl: modifiers.control_key(),
+        alt: modifiers.alt_key(),
+        shift: modifiers.shift_key(),
+        primary: false,
     }
 }

@@ -2,7 +2,7 @@
 //! window has no native drag source, so this covers what the app sees when
 //! a drag out cannot start: the reason, and its own drag carrying on.
 
-use quark_ui::element::{AnyElement, DragHandler, DragReleaseResult, IntoAnyElement, div};
+use quark_ui::element::{AnyElement, DragHandler, DragReleaseResult, IntoAnyElement, Mods, div};
 use quark_ui::style::Styled;
 
 use crate::platform::drag_out::DragOutError;
@@ -24,11 +24,11 @@ impl From<Msg> for quark_ui::Action {
 struct Track;
 
 impl DragHandler for Track {
-    fn on_move(&mut self, _x: f32, _y: f32) -> Vec<quark_ui::Action> {
+    fn on_move(&mut self, _x: f32, _y: f32, _modifiers: Mods) -> Vec<quark_ui::Action> {
         vec![Msg::Moved.into()]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![Msg::Released.into()],
         }

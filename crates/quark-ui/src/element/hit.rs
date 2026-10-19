@@ -100,8 +100,12 @@ pub trait DragHandler {
     fn on_press(&mut self) -> Vec<Action> {
         Vec::new()
     }
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action>;
-    fn on_release(&mut self) -> DragReleaseResult;
+    /// The pointer moved to `(x, y)` with `modifiers` held. The press's
+    /// modifiers are the [`ClickEvent`] the drag started with.
+    fn on_move(&mut self, x: f32, y: f32, modifiers: Mods) -> Vec<Action>;
+    /// The button was released with `modifiers` held (an Alt drop that
+    /// copies, say).
+    fn on_release(&mut self, modifiers: Mods) -> DragReleaseResult;
     /// The drag ended without a release: the window lost focus, the app
     /// cancelled it (Escape), or the platform took the pointer for a
     /// native drag. Back out: commit nothing a release would (a drop, a

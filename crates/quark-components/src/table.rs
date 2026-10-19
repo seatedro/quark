@@ -32,8 +32,8 @@ use quark::view;
 use quark_ui::accessibility::SortDirection;
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement,
-    ScrollActionBuilder, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon,
-    text,
+    Mods, ScrollActionBuilder, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash,
+    svg_icon, text,
 };
 use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
@@ -1195,14 +1195,14 @@ struct HeaderDrag {
 }
 
 impl DragHandler for HeaderDrag {
-    fn on_move(&mut self, x: f32, _y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
         vec![(self.on_event)(TableEvent::HeaderDrag {
             column: self.column,
             dx: x - self.press_x,
         })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.on_event)(TableEvent::HeaderRelease {
                 column: self.column,
@@ -1224,14 +1224,14 @@ struct ResizeDrag {
 }
 
 impl DragHandler for ResizeDrag {
-    fn on_move(&mut self, x: f32, _y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
         vec![(self.on_event)(TableEvent::Resize {
             column: self.column,
             width: self.start_width + x - self.press_x,
         })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult::empty()
     }
 

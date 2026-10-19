@@ -9,7 +9,8 @@ use crate::animation::{AnimKey, AnimationTable, Motion, PropId};
 
 /// Everything elements see while laying out and painting. Element geometry
 /// is in logical points; `scale_factor` is the window's physical pixels per
-/// point, used only to shape text at physical size.
+/// point, used to shape text at physical size and to snap layout bounds to
+/// whole physical pixels.
 pub struct ElementContext<'a> {
     pub theme: &'a Theme,
     pub scale_factor: f32,
@@ -100,6 +101,9 @@ pub struct ElementContext<'a> {
     /// Whether to build accessibility nodes: off while no assistive tech
     /// listens, so frames do not build labels nobody reads.
     accessibility_enabled: bool,
+    /// How many enclosing elements hide their subtree from assistive tech
+    /// (`Div::accessibility_hidden`); while nonzero, no node is published.
+    accessibility_hidden_depth: u32,
 }
 
 impl<'a> ElementContext<'a> {
@@ -164,6 +168,7 @@ impl<'a> ElementContext<'a> {
             scroll_stack: Vec::new(),
             scroll_watches: Vec::new(),
             accessibility_enabled: true,
+            accessibility_hidden_depth: 0,
         }
     }
 
@@ -474,6 +479,21 @@ impl<'a> ElementContext<'a> {
             .unwrap_or(false)
     }
 
+    /// Hide everything painted until [`Self::pop_accessibility_hidden`],
+    /// nodes and text alike, from the accessibility tree.
+    pub fn push_accessibility_hidden(&mut self) {
+        self.accessibility_hidden_depth += 1;
+    }
+
+    pub fn pop_accessibility_hidden(&mut self) {
+        self.accessibility_hidden_depth = self.accessibility_hidden_depth.saturating_sub(1);
+    }
+
+    /// Whether an ancestor hides what paints now from the accessibility tree.
+    pub fn accessibility_hidden(&self) -> bool {
+        self.accessibility_hidden_depth > 0
+    }
+
     pub fn current_semantic_parent(&self) -> Option<usize> {
         self.semantic_parent_stack.last().copied()
     }
@@ -491,7 +511,7 @@ impl<'a> ElementContext<'a> {
     /// The node's bounds are in layout coordinates; it is published at the
     /// window bounds of their four corners under the current transform.
     pub fn push_accessibility(&mut self, mut node: AccessibilityNode) -> accesskit::NodeId {
-        if !self.accessibility_enabled {
+        if !self.accessibility_enabled || self.accessibility_hidden() {
             return crate::accessibility::ROOT_ID;
         }
         node.set_transform(self.current_transform());
@@ -508,7 +528,7 @@ impl<'a> ElementContext<'a> {
         mut node: AccessibilityNode,
         parent: accesskit::NodeId,
     ) -> accesskit::NodeId {
-        if !self.accessibility_enabled {
+        if !self.accessibility_enabled || self.accessibility_hidden() {
             return crate::accessibility::ROOT_ID;
         }
         node.set_transform(self.current_transform());
@@ -552,7 +572,7 @@ impl<'a> ElementContext<'a> {
         semantic_index: usize,
     ) -> accesskit::NodeId {
         let id = self.push_accessibility(node);
-        if self.accessibility_enabled {
+        if self.accessibility_enabled && !self.accessibility_hidden() {
             self.accessibility.bind_semantic(semantic_index, id);
         }
         id

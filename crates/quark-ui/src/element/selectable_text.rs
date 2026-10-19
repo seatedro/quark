@@ -404,12 +404,12 @@ impl DragHandler for RichTextDrag {
         self.changed()
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         self.state.extend(self.region.hit(x, y).get());
         self.changed()
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: Vec::new(),
         }
@@ -1271,8 +1271,11 @@ impl Element for SelectableText {
                     .max_lines(self.max_lines),
             ),
             _ => {
-                let width =
-                    explicit.unwrap_or_else(|| layout.as_ref().map_or(0.0, |l| l.size().0.ceil()));
+                let width = explicit.unwrap_or_else(|| {
+                    layout
+                        .as_ref()
+                        .map_or(0.0, |l| ceil_to_pixels(l.size().0, l.scale_factor()))
+                });
                 let height = Self::paragraph_height(layout.as_deref(), &paragraph, self.max_lines);
                 engine.request_layout(
                     taffy::Style {

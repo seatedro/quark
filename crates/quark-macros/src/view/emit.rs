@@ -105,7 +105,25 @@ const INLINE_TAGS: &[&str] = &[
 
 /// Spatial builder methods that `view! { scale, .. }` multiplies by scale.
 const SPATIAL_ATTRS: &[&str] = &[
-    "gap", "gap_x", "gap_y", "p", "px", "py", "pt", "pb", "pl", "pr", "rounded",
+    "gap",
+    "gap_x",
+    "gap_y",
+    "p",
+    "px",
+    "py",
+    "pt",
+    "pb",
+    "pl",
+    "pr",
+    "m",
+    "mx",
+    "my",
+    "mt",
+    "mb",
+    "ml",
+    "mr",
+    "margin_left",
+    "rounded",
 ];
 
 /// `role="..."` values: ARIA role names and the `SemanticRole` they set.
@@ -177,6 +195,7 @@ const ARIA: &[(&str, &str)] = &[
     ("aria-colindex", "accessibility_column_index"),
     ("aria-sort", "accessibility_sort"),
     ("aria-live", "live"),
+    ("aria-hidden", "accessibility_hidden"),
 ];
 
 const KEY_MODIFIERS: &[&str] = &[

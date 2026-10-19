@@ -151,9 +151,9 @@ lists what each one does where.
 
 Lower-level crates have their own: `quark-ui` has `images`, `devtools`,
 `profile`, `test-alloc`, and `integrity-checks`; `quark-text` has
-`emoji-font`, `cjk-font`, and `profile`; `quark-render` has
-`headless-render`; `quark` has `integrity-checks`. Each is described next
-to its definition in the crate's `Cargo.toml`. Quark has no syntax
+`emoji-font`, `cjk-font`, `profile`, and `integrity-checks`;
+`quark-render` has `headless-render`; `quark` has `integrity-checks`.
+Each is described next to its definition in the crate's `Cargo.toml`. Quark has no syntax
 highlighting feature: code blocks render plain unless the app supplies a
 `CodeHighlighter`.
 

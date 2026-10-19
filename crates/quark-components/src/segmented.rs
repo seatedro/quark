@@ -73,6 +73,16 @@ impl RenderOnce for SegmentedControl {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();
+        // Scaled here and rounded to whole points, so the inset is even on
+        // every side at any zoom.
+        let recipe = cx.theme.components.segmented;
+        let scaled = |v: Option<f32>, default: f32| (v.unwrap_or(default) * scale).round();
+        let inset = scaled(recipe.gap, Sp::XXS);
+        let radius = scaled(recipe.radius, Rad::XL);
+        let pad_x = scaled(recipe.padding_x, Sp::MD);
+        let pad_y = scaled(recipe.padding_y, Sp::XXS);
+        let height = recipe.height.map(|h| (h * scale).round());
+        let font_size = recipe.font_size.map(|s| s * scale);
         let base = FocusId::from_key(&self.id);
         let len = self.items.len();
         let selected = self.items.iter().position(|item| item.selected);
@@ -89,9 +99,10 @@ impl RenderOnce for SegmentedControl {
                 accessibility_role={accesskit::Role::RadioGroup}
                 accessibility_id={self.id.clone()}
                 bg={tc.element_background}
-                rounded={Rad::XL * scale}
-                p={Sp::XXS * scale}
-                gap={Sp::XXS * scale}
+                border={tc.border_variant}
+                rounded={radius}
+                p={inset}
+                gap={inset}
                 @when {let Some(to) = list_nav::step(len, current, 1, true, |_| false)} {
                     on_key={("arrowright", self.items[to].action.clone())}
                 }
@@ -109,8 +120,8 @@ impl RenderOnce for SegmentedControl {
                         key={item.label.clone()}
                         test_id="segmented-item"
                         role="radio"
-                        py={Sp::XXS * scale}
-                        rounded={Rad::LG * scale}
+                        py={pad_y}
+                        rounded={(radius - inset).max(0.0)}
                         focus_ring={list_nav::item_focus(base, i)}
                         accessibility_role={accesskit::Role::RadioButton}
                         accessibility_id={format!("segmented:{:?}:{}", item.action, item.label)}
@@ -119,17 +130,22 @@ impl RenderOnce for SegmentedControl {
                         aria-checked={item.selected}
                         class="cursor-pointer"
                         on:click={item.action}
-                        @when {item.selected} { bg={tc.ghost_element_hover} }
+                        @when {height.is_some()} { h={height.unwrap()} pt={0.0} pb={0.0} }
+                        // A solid fill one step above the track, apart from
+                        // the tinted hover of the other segments.
+                        @when {item.selected} { bg={tc.element_hover} }
+                        // One `hover` for both: each `hover_*` helper
+                        // replaces the hover style the last one set.
                         @when {!item.selected} {
-                            hover_bg={tc.ghost_element_hover}
-                            hover_text_color={tc.text}
+                            hover={|s| s.bg(tc.ghost_element_hover).text_color(tc.text)}
                         }
                         @when {tab_stop != Some(i)} { tab_stop={TabStop::disabled(0)} }
                         @when {let Some(tip) = item.tooltip_text} { tooltip={tip} }
                     >
-                        <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />
+                        <div w={pad_x} flex_shrink_val={PAD_SHRINK} />
                         <text
                             class="text-sm font-medium truncate"
+                            @when {font_size.is_some()} { size={font_size.unwrap()} }
                             color={if item.selected {
                                 tc.text
                             } else {
@@ -138,7 +154,7 @@ impl RenderOnce for SegmentedControl {
                         >
                             {item.label}
                         </text>
-                        <div w={Sp::MD * scale} flex_shrink_val={PAD_SHRINK} />
+                        <div w={pad_x} flex_shrink_val={PAD_SHRINK} />
                     </div>
                 }
             </div>

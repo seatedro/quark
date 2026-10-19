@@ -10,7 +10,7 @@ use quark::animation::{AnimKey, Curve, Motion, PropId};
 use quark::scene::{Primitive, Scene};
 use quark_ui::element::{
     AnyElement, DragHandler, DragHandoff, DragOutcome, DragPreview, DragReleaseResult, DragResult,
-    DropPolicy, DropTarget, DropTargetHit, DropTargetId, IntoAnyElement, canvas, div, text,
+    DropPolicy, DropTarget, DropTargetHit, DropTargetId, IntoAnyElement, Mods, canvas, div, text,
     text_input,
 };
 use quark_ui::style::Styled;
@@ -68,11 +68,11 @@ impl TabDrag {
 }
 
 impl DragHandler for TabDrag {
-    fn on_move(&mut self, _x: f32, _y: f32) -> Vec<Action> {
+    fn on_move(&mut self, _x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
         vec![Msg::TabMoved.into()]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult::empty()
     }
 

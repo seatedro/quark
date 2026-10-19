@@ -114,6 +114,8 @@ pub struct TextElement {
     family: Option<FontFamily>,
     /// Extra advance after every glyph, in ems.
     letter_spacing: f32,
+    /// Where wrapped lines start, in pixels.
+    hanging_indent: f32,
     underline: bool,
     /// How the underline looks; `None` is solid in the text color.
     underline_style: Option<TextDecorationStyle>,
@@ -135,6 +137,7 @@ pub fn text(content: impl Into<String>) -> TextElement {
         font_weight: FontWeight::Normal,
         family: None,
         letter_spacing: 0.0,
+        hanging_indent: 0.0,
         underline: false,
         underline_style: None,
         strikethrough: false,
@@ -312,6 +315,14 @@ impl TextElement {
         self
     }
 
+    /// Starts every wrapped line `indent` pixels in, and each paragraph's
+    /// first line at the left edge: a list item's or diff line's text lines
+    /// up past its marker.
+    pub fn hanging_indent(mut self, indent: f32) -> Self {
+        self.hanging_indent = indent;
+        self
+    }
+
     pub fn wrap(mut self, mode: WrapMode) -> Self {
         self.wrap = match mode {
             WrapMode::Explicit(width) => WrapMode::Explicit(width.max(1.0)),
@@ -333,6 +344,7 @@ impl TextElement {
             .kind(self.font_kind)
             .weight(self.font_weight)
             .letter_spacing(self.letter_spacing)
+            .hanging_indent(self.hanging_indent)
             .line_height(self.line_height.resolve(font_size));
         if let Some(family) = self.family {
             style = style.font_family(family);
@@ -397,7 +409,8 @@ impl Element for TextElement {
         };
         let layout = cx.layout_text_query(&self.query(&self.content, font_size, explicit));
         let (layout_width, layout_height) = layout.as_ref().map_or((0.0, 0.0), |l| l.size());
-        let text_width = layout_width.ceil();
+        // Whole device pixels, so the box layout snaps keeps this width.
+        let text_width = ceil_to_pixels(layout_width, cx.scale_factor);
 
         let id = match (wrap, &layout) {
             // Sized by layout: shrinks in a flex row, wrapping as it does.
@@ -407,7 +420,10 @@ impl Element for TextElement {
             ),
             _ => {
                 let (width, height) = match explicit {
-                    Some(wrap) => (wrap, layout_height.max(line_height).ceil()),
+                    Some(wrap) => (
+                        wrap,
+                        ceil_to_pixels(layout_height.max(line_height), cx.scale_factor),
+                    ),
                     None => (text_width, line_height),
                 };
                 // Unwrapped text shrinks only when `.truncate()` is set;
@@ -484,7 +500,9 @@ impl Element for TextElement {
                     && let Some(unwrapped) = &layout
                 {
                     layout = cx.layout_text_query(&unwrapped.query().wrap_width(Some(width)));
-                    text_width = layout.as_ref().map_or(0.0, |l| l.size().0.ceil());
+                    text_width = layout
+                        .as_ref()
+                        .map_or(0.0, |l| ceil_to_pixels(l.size().0, l.scale_factor()));
                     wrapped = true;
                 }
             }
@@ -951,7 +969,7 @@ mod tests {
     }
 
     // Catches paint rewrapping at a width other than the one measured: at
-    // a fractional width taffy rounds the box after measuring it, and text
+    // a fractional width layout rounds the box after measuring it, and text
     // shaped at the rounded width painted one line in a box measured for
     // two. Plain and selectable text break the same lines, each fitting
     // the box.
@@ -978,7 +996,7 @@ mod tests {
                         assert_eq!(lines.concat(), s, "{case}");
                         assert_eq!(
                             rect.height,
-                            (lines.len() as f32 * line).ceil(),
+                            ceil_to_pixels(lines.len() as f32 * line, scale),
                             "{case}: {lines:?}"
                         );
                         for painted in lines {

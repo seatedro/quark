@@ -18,8 +18,8 @@ use quark_text::{TextBlock, TextLayout, TextQuery, TextSpan, TextStyle};
 use quark_ui::accessibility::{AccessibilityNode, AccessibleText};
 use quark_ui::element::{
     AnyElement, Bounds, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult,
-    DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId, cached, canvas,
-    div, inputs_hash,
+    DragStart, Element, ElementContext, IntoAnyElement, LayoutEngine, LayoutId, Mods, cached,
+    canvas, div, inputs_hash,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
@@ -823,11 +823,11 @@ impl DragHandler for SelectDrag {
         })]
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         vec![(self.on_event)(TerminalEvent::Drag { x, y })]
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.on_event)(TerminalEvent::Release)],
         }

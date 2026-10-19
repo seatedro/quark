@@ -59,6 +59,14 @@ pub struct SyntaxSpan {
 /// after the text changes, and only in code modes.
 pub type SyntaxHighlighter = Arc<dyn Fn(&str) -> Vec<SyntaxSpan> + Send + Sync>;
 
+/// Produces display formatting for the full editor text in prose modes,
+/// such as a bold commit subject. Called lazily on flush after the text
+/// changes. Its spans only style the layout: they are not part of the
+/// text, so they never enter undo, move the caret, or show up in
+/// [`Editor::rich_text`]. Only the style flags apply; links come from the
+/// text's own formatting.
+pub type StyleHighlighter = Arc<dyn Fn(&str) -> Vec<StyleSpan> + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum EditorMode {
     #[default]
@@ -125,6 +133,9 @@ pub struct Editor {
     syntax_dirty: bool,
     syntax_highlighter: Option<SyntaxHighlighter>,
     syntax_spans: Arc<[SyntaxSpan]>,
+    style_highlighter: Option<StyleHighlighter>,
+    /// The style highlighter's spans, as of the last refresh.
+    highlight_styles: Arc<[StyleSpan]>,
     /// Token kind of each span of `layout`, for paint colors.
     span_kinds: Arc<[SyntaxTokenKind]>,
     /// Token kind of each span of `display`.
@@ -284,6 +295,91 @@ pub(super) fn style_layout_spans(styles: &[StyleSpan]) -> (Vec<TextSpan>, Vec<Sy
     (spans, kinds)
 }
 
+/// The text's own formatting with the highlighter's style flags added,
+/// as one sorted run list without overlaps: layout spans override each
+/// other wholesale where they overlap, so a highlighted bold over a
+/// user's italic must become one bold italic run. Highlight spans that
+/// are empty, past the text, or off a char boundary are skipped.
+pub(super) fn merge_highlight_styles(
+    text: &str,
+    document: &[StyleSpan],
+    highlight: &[StyleSpan],
+) -> Vec<StyleSpan> {
+    let valid = |r: &Range<usize>| {
+        r.start < r.end
+            && r.end <= text.len()
+            && text.is_char_boundary(r.start)
+            && text.is_char_boundary(r.end)
+    };
+    // (offset, starts, flags): ends sort before starts at the same offset.
+    let mut events: Vec<(usize, bool, InlineStyle)> = Vec::new();
+    for span in highlight
+        .iter()
+        .filter(|s| valid(&s.range) && !s.format.style.is_plain())
+    {
+        events.push((span.range.start, true, span.format.style));
+        events.push((span.range.end, false, span.format.style));
+    }
+    events.sort_by_key(|&(at, starts, _)| (at, starts));
+    let mut cuts: Vec<usize> = events.iter().map(|e| e.0).collect();
+    cuts.extend(document.iter().flat_map(|s| [s.range.start, s.range.end]));
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    const FLAGS: [InlineStyle; 5] = [
+        InlineStyle::BOLD,
+        InlineStyle::ITALIC,
+        InlineStyle::UNDERLINE,
+        InlineStyle::STRIKE,
+        InlineStyle::CODE,
+    ];
+    // Open count per flag, so overlapping highlight spans union.
+    let mut open = [0u32; FLAGS.len()];
+    let mut next_event = 0;
+    let mut doc = 0;
+    let mut merged: Vec<StyleSpan> = Vec::new();
+    for (&start, &end) in cuts.iter().zip(cuts.iter().skip(1)) {
+        while let Some(&(at, starts, style)) = events.get(next_event)
+            && at <= start
+        {
+            for (flag, count) in FLAGS.iter().zip(&mut open) {
+                if style.contains(*flag) {
+                    if starts {
+                        *count += 1;
+                    } else {
+                        *count -= 1;
+                    }
+                }
+            }
+            next_event += 1;
+        }
+        while document.get(doc).is_some_and(|s| s.range.end <= start) {
+            doc += 1;
+        }
+        let mut format = document
+            .get(doc)
+            .filter(|s| s.range.start <= start)
+            .map(|s| s.format.clone())
+            .unwrap_or_default();
+        for (flag, &count) in FLAGS.iter().zip(&open) {
+            if count > 0 {
+                format.style = format.style.union(*flag);
+            }
+        }
+        if format.is_plain() {
+            continue;
+        }
+        match merged.last_mut() {
+            Some(last) if last.range.end == start && last.format == format => last.range.end = end,
+            _ => merged.push(StyleSpan {
+                range: start..end,
+                format,
+            }),
+        }
+    }
+    merged
+}
+
 /// A misspelled word, for a context menu of corrections.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpellingIssue {
@@ -348,6 +444,8 @@ impl Editor {
             syntax_dirty: true,
             syntax_highlighter: None,
             syntax_spans: Arc::from([]),
+            style_highlighter: None,
+            highlight_styles: Arc::from([]),
             span_kinds: Arc::from([]),
             display_span_kinds: Arc::from([]),
             line_tops: Arc::from([]),
@@ -395,6 +493,21 @@ impl Editor {
         self.syntax_highlighter = None;
         self.syntax_spans = Arc::from([]);
         self.syntax_dirty = false;
+        self.dirty = true;
+    }
+
+    /// Style prose for display with `highlighter`; see [`StyleHighlighter`].
+    pub fn set_style_highlighter(&mut self, highlighter: StyleHighlighter) {
+        self.style_highlighter = Some(highlighter);
+        self.syntax_dirty = true;
+    }
+
+    pub fn clear_style_highlighter(&mut self) {
+        if self.style_highlighter.is_none() && self.highlight_styles.is_empty() {
+            return;
+        }
+        self.style_highlighter = None;
+        self.highlight_styles = Arc::from([]);
         self.dirty = true;
     }
 
@@ -510,15 +623,20 @@ impl Editor {
             return;
         }
         self.syntax_dirty = false;
-        let had_spans = !self.syntax_spans.is_empty();
+        let had_spans = !self.syntax_spans.is_empty() || !self.highlight_styles.is_empty();
         self.syntax_spans = Arc::from([]);
-        if self.mode.is_code()
-            && self.buffer.text().len() <= SYNTAX_HIGHLIGHT_MAX_BYTES
-            && let Some(highlighter) = &self.syntax_highlighter
-        {
-            self.syntax_spans = highlighter(self.buffer.text()).into();
+        self.highlight_styles = Arc::from([]);
+        let text = self.buffer.text();
+        if text.len() <= SYNTAX_HIGHLIGHT_MAX_BYTES {
+            if self.mode.is_code() {
+                if let Some(highlighter) = &self.syntax_highlighter {
+                    self.syntax_spans = highlighter(text).into();
+                }
+            } else if let Some(highlighter) = &self.style_highlighter {
+                self.highlight_styles = highlighter(text).into();
+            }
         }
-        if had_spans || !self.syntax_spans.is_empty() {
+        if had_spans || !self.syntax_spans.is_empty() || !self.highlight_styles.is_empty() {
             self.dirty = true;
         }
     }
@@ -628,8 +746,15 @@ impl Editor {
             self.dirty = false;
             let (spans, kinds) = if self.mode.is_code() {
                 syntax_layout_spans(self.buffer.text(), &self.syntax_spans)
-            } else {
+            } else if self.highlight_styles.is_empty() {
                 style_layout_spans(self.buffer.styles())
+            } else {
+                let merged = merge_highlight_styles(
+                    self.buffer.text(),
+                    self.buffer.styles(),
+                    &self.highlight_styles,
+                );
+                style_layout_spans(&merged)
             };
             self.layout_text = Arc::from(self.buffer.text());
             let params = self.layout_params(self.layout_text.clone(), spans);
@@ -1275,5 +1400,65 @@ mod tests {
         editor.set_text("\u{e9}\nb");
         editor.apply(SelectLineAt(1));
         assert_eq!(editor.selected_text(), Some("\u{e9}\n"));
+    }
+
+    fn bold_first_line() -> StyleHighlighter {
+        Arc::new(|text: &str| {
+            let end = text.find('\n').unwrap_or(text.len());
+            vec![StyleSpan::new(0..end, InlineStyle::BOLD)]
+        })
+    }
+
+    // A commit subject is bold for display while staying plain text: the
+    // highlight follows edits without entering undo, moving the caret, or
+    // reaching the rich text the app reads back.
+    #[test]
+    fn style_highlighter_bolds_prose_for_layout_only() {
+        let (mut text_system, mut editor) = make_editor(400.0, 200.0);
+        editor.set_style_highlighter(bold_first_line());
+        editor.apply(InsertText("Fix\n\nbody".into()));
+        editor.flush(&mut text_system);
+        let bold = |editor: &Editor| {
+            let layout = editor.paint_layout().unwrap();
+            layout
+                .spans()
+                .iter()
+                .filter(|s| s.weight == Some(FontWeight::Bold))
+                .map(|s| (s.range.start, s.range.end))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bold(&editor), [(0, 3)]);
+
+        editor.apply(SetTextCursor(3));
+        editor.apply(InsertText(" bug".into()));
+        editor.flush(&mut text_system);
+        assert_eq!(bold(&editor), [(0, 7)]);
+        assert_eq!(editor.cursor().get(), 7);
+        assert!(editor.rich_text().styles.is_empty());
+
+        editor.apply(Undo);
+        editor.flush(&mut text_system);
+        assert_eq!(editor.text(), "Fix\n\nbody");
+        assert_eq!(bold(&editor), [(0, 3)]);
+    }
+
+    #[test]
+    fn highlight_styles_union_with_the_text_formatting() {
+        let text = "subject line";
+        let document = [StyleSpan::new(8..12, InlineStyle::ITALIC)];
+        let highlight = [
+            StyleSpan::new(0..7, InlineStyle::BOLD),
+            StyleSpan::new(4..10, InlineStyle::BOLD),
+            StyleSpan::new(5..99, InlineStyle::UNDERLINE),
+        ];
+        let merged = merge_highlight_styles(text, &document, &highlight);
+        assert_eq!(
+            merged,
+            [
+                StyleSpan::new(0..8, InlineStyle::BOLD),
+                StyleSpan::new(8..10, InlineStyle::BOLD.union(InlineStyle::ITALIC)),
+                StyleSpan::new(10..12, InlineStyle::ITALIC),
+            ]
+        );
     }
 }

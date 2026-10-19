@@ -1509,7 +1509,7 @@ impl DragHandler for ScrollbarDrag {
         }
     }
 
-    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
         let Some(grab) = self.grab else {
             return Vec::new();
         };
@@ -1523,7 +1523,7 @@ impl DragHandler for ScrollbarDrag {
         }
     }
 
-    fn on_release(&mut self) -> DragReleaseResult {
+    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
         match &self.sink {
             ScrollSink::Handle(handle) => {
                 handle.set_dragging(None);
@@ -1544,7 +1544,7 @@ impl DragHandler for ScrollbarDrag {
     /// The offset dragged to stays, as it does with every live drag; the
     /// release only lets go of the thumb and reports the drag's end.
     fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release().actions
+        self.on_release(Mods::default()).actions
     }
 }
 

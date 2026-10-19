@@ -40,11 +40,37 @@ pub enum HitIdentity {
     OverlayBackdrop,
 }
 
-/// A pointer click at a specific position, in hit table coordinates.
+/// Modifier keys: those of a key binding, or those held during a click or
+/// a drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Mods {
+    pub cmd: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    /// `mod` in binding strings: either Cmd or Ctrl. Only patterns set it;
+    /// a pressed key or a click reports the concrete modifier.
+    pub primary: bool,
+}
+
+/// A pointer click at a specific position, in hit table coordinates, with
+/// the modifier keys held when it pressed.
 #[derive(Debug, Clone, Copy)]
 pub struct ClickEvent {
     pub x: f32,
     pub y: f32,
+    pub modifiers: Mods,
+}
+
+impl ClickEvent {
+    /// A click at `(x, y)` with no modifier held.
+    pub fn at(x: f32, y: f32) -> Self {
+        Self {
+            x,
+            y,
+            modifiers: Mods::default(),
+        }
+    }
 }
 
 /// A tooltip-bearing rectangle collected during paint. The host app drains
