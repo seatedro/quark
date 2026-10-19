@@ -22,6 +22,7 @@ use std::cell::{Cell, RefCell};
 
 use super::*;
 use crate::design::ScrollbarSz;
+use crate::theme::scaled_or;
 
 /// Distance one arrow key scrolls.
 pub const KEY_LINE_PX: f32 = 2.0 * WHEEL_LINE_PX;
@@ -1231,6 +1232,7 @@ impl Scrollbars {
             (content.0 as f32, content.1 as f32),
             (offset.0 as f32, offset.1 as f32),
             axes,
+            BarSize::of(cx.theme),
         );
         if bars.iter().all(Option::is_none) {
             return Self::default();
@@ -1304,6 +1306,33 @@ pub(crate) struct Scrollbar {
     pub viewport: f32,
 }
 
+/// Scrollbar sizes from the theme, in window points.
+#[derive(Debug, Clone, Copy)]
+struct BarSize {
+    width: f32,
+    inset: f32,
+    radius: f32,
+    min_thumb: f32,
+    hit_pad: f32,
+}
+
+impl BarSize {
+    fn of(theme: &Theme) -> Self {
+        let m = theme.components.scrollbar;
+        let scale = theme.metrics.ui_scale();
+        let size =
+            |value: Option<f32>, default: f32| scaled_or(value, scale, (default * scale).round());
+        let width = size(m.width, ScrollbarSz::WIDTH);
+        Self {
+            width,
+            inset: size(m.inset, ScrollbarSz::INSET),
+            radius: m.radius.map_or(width / 2.0, |r| (r * scale).round()),
+            min_thumb: size(m.min_thumb, ScrollbarSz::MIN_THUMB),
+            hit_pad: (ScrollbarSz::HIT_PAD * scale).round(),
+        }
+    }
+}
+
 /// Scrollbars of a container at `bounds`, on each axis in `axes` whose
 /// `content` overflows. A vertical bar leaves room for a horizontal one.
 fn scrollbars(
@@ -1311,9 +1340,10 @@ fn scrollbars(
     content: (f32, f32),
     offset: (f32, f32),
     axes: ScrollAxes,
+    size: BarSize,
 ) -> [Option<Scrollbar>; 2] {
-    let w = ScrollbarSz::WIDTH;
-    let inset = ScrollbarSz::INSET;
+    let w = size.width;
+    let inset = size.inset;
     let overflows = |axis: Axis| axes.has(axis) && axis.of(content) > axis.span(bounds).1 + 0.5;
     let (has_x, has_y) = (overflows(Axis::X), overflows(Axis::Y));
     let bar = |axis: Axis, track: Rect, hit: Rect| {
@@ -1322,9 +1352,7 @@ fn scrollbars(
         let max = (content_len - viewport).max(0.0);
         let offset = axis.of(offset).clamp(0.0, max);
         let (start, len) = axis.span(track);
-        let thumb_len = (len * viewport / content_len)
-            .max(ScrollbarSz::MIN_THUMB)
-            .min(len);
+        let thumb_len = (len * viewport / content_len).max(size.min_thumb).min(len);
         let thumb_start = start
             + if max > 0.0 {
                 offset / max * (len - thumb_len)
@@ -1362,9 +1390,9 @@ fn scrollbars(
             height: (bounds.height - inset - corner(has_x)).max(0.0),
         };
         let hit = Rect {
-            x: track.x - ScrollbarSz::HIT_PAD,
+            x: track.x - size.hit_pad,
             y: bounds.y,
-            width: w + ScrollbarSz::HIT_PAD,
+            width: w + size.hit_pad,
             height: (bounds.height - if has_x { w } else { 0.0 }).max(0.0),
         };
         bar(Axis::Y, track, hit)
@@ -1378,9 +1406,9 @@ fn scrollbars(
         };
         let hit = Rect {
             x: bounds.x,
-            y: track.y - ScrollbarSz::HIT_PAD,
+            y: track.y - size.hit_pad,
             width: (bounds.width - if has_y { w } else { 0.0 }).max(0.0),
-            height: w + ScrollbarSz::HIT_PAD,
+            height: w + size.hit_pad,
         };
         bar(Axis::X, track, hit)
     });
@@ -1409,11 +1437,11 @@ impl Scrollbar {
 
     /// Paint the track and thumb; `hovered` and `active` brighten the thumb.
     pub fn paint(&self, scene: &mut Scene, theme: &Theme, hovered: bool, active: bool) {
-        let w = ScrollbarSz::WIDTH;
+        let radius = BarSize::of(theme).radius;
         scene.rounded_rect(RoundedRectPrimitive::uniform(
             self.track,
-            w / 2.0,
-            Color::rgba(128, 128, 128, 10),
+            radius,
+            theme.colors.scrollbar_track,
         ));
         let base = theme.colors.scrollbar_thumb;
         let boost = if active {
@@ -1432,7 +1460,7 @@ impl Scrollbar {
                 width: (t.width - 2.0).max(0.0),
                 height: (t.height - 2.0).max(0.0),
             },
-            w / 2.0 - 1.0,
+            (radius - 1.0).max(0.0),
             color,
         ));
     }
@@ -1627,6 +1655,35 @@ mod tests {
         for (now, expected) in cases {
             assert_eq!(samples.velocity(now), expected, "lift at {now}");
         }
+    }
+
+    #[test]
+    fn theme_sets_scrollbar_geometry() {
+        let mut theme = crate::theme::Theme::default_dark().with_ui_scale(2.0);
+        theme.components.scrollbar = crate::theme::ScrollbarMetrics {
+            width: Some(4.0),
+            inset: Some(0.0),
+            ..Default::default()
+        };
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let axes = ScrollAxes { x: false, y: true };
+        let [_, y] = scrollbars(
+            bounds,
+            (100.0, 400.0),
+            (0.0, 0.0),
+            axes,
+            BarSize::of(&theme),
+        );
+        let track = y.expect("vertical bar").track;
+        assert_eq!(
+            (track.x, track.y, track.width, track.height),
+            (92.0, 0.0, 8.0, 100.0)
+        );
     }
 
     mod items {

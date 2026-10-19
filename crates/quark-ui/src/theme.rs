@@ -123,6 +123,7 @@ tokens! {
         empty_state_background,
         empty_state_border,
         scrollbar_thumb,
+        scrollbar_track,
         slider_track,
         status_info,
         status_warning,
@@ -286,6 +287,18 @@ pub struct SurfaceMetrics {
     pub icon_size: Option<f32>,
 }
 
+/// Optional scrollbar sizes. Same units and scaling as [`ControlMetrics`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ScrollbarMetrics {
+    /// Track thickness.
+    pub width: Option<f32>,
+    /// Gap between the track's ends and the container's edges.
+    pub inset: Option<f32>,
+    /// Track corner radius; half the width by default.
+    pub radius: Option<f32>,
+    pub min_thumb: Option<f32>,
+}
+
 /// Per-component overrides an app sets once on its theme, so every
 /// instance in every window follows one recipe. The default overrides
 /// nothing: components look as they always have.
@@ -315,6 +328,7 @@ pub struct ComponentMetrics {
     pub segmented: ControlMetrics,
     /// Keycaps, including search field hints.
     pub kbd: ControlMetrics,
+    pub scrollbar: ScrollbarMetrics,
 }
 
 impl ComponentMetrics {
@@ -625,6 +639,7 @@ fn dark_colors(
 
         // Scrollbar
         scrollbar_thumb: Color::rgba(255, 255, 255, 100),
+        scrollbar_track: Color::rgba(128, 128, 128, 10),
 
         // Status indicators
         status_info: b[Solid],
@@ -733,6 +748,7 @@ fn light_colors(
 
         // Scrollbar
         scrollbar_thumb: n[BorderStrong],
+        scrollbar_track: Color::rgba(128, 128, 128, 10),
 
         // Status
         status_info: b[Solid],
@@ -856,6 +872,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         empty_state_background: rgb(0x0a0a0a),
         empty_state_border: rgb(0xa3a3a3),
         scrollbar_thumb: rgb(0xbdbdbd),
+        scrollbar_track: Color::rgba(128, 128, 128, 10),
         status_info: rgb(0xb0d9ff),
         status_warning: rgb(0xffd60a),
         status_error: rgb(0xffc2c2),
@@ -928,6 +945,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         empty_state_background: rgb(0xfafafa),
         empty_state_border: rgb(0x6b6b6b),
         scrollbar_thumb: rgb(0x4d4d4d),
+        scrollbar_track: Color::rgba(128, 128, 128, 10),
         status_info: rgb(0x00317f),
         status_warning: rgb(0x422c00),
         status_error: rgb(0x7a0000),
@@ -1334,15 +1352,16 @@ mod tests {
     }
 
     // Catches a high-contrast token left translucent, which would make its
-    // contrast depend on whatever sits behind it. The scrim dims a window
-    // under a modal and is translucent by design.
+    // contrast depend on whatever sits behind it. The scrim, which dims a
+    // window under a modal, and the scrollbar track are translucent by
+    // design.
     #[test]
     fn high_contrast_colors_are_opaque() {
         for theme in [Theme::high_contrast_dark(), Theme::high_contrast_light()] {
             let translucent: Vec<&str> = ThemeColors::TOKENS
                 .iter()
                 .copied()
-                .filter(|&name| name != "overlay_scrim")
+                .filter(|&name| !["overlay_scrim", "scrollbar_track"].contains(&name))
                 .filter(|&name| theme.colors.get(name).is_some_and(|c| c.a != 255))
                 .collect();
             assert!(translucent.is_empty(), "{:?}: {translucent:?}", theme.mode);

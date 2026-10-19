@@ -26,8 +26,8 @@
 use std::sync::OnceLock;
 
 use quark_app::quark_ui::theme::{
-    ComponentMetrics, ControlMetrics, Elevation, SurfaceMetrics, Theme, ThemeContrast, ThemeFamily,
-    ThemeMode,
+    ComponentMetrics, ControlMetrics, Elevation, ScrollbarMetrics, SurfaceMetrics, Theme,
+    ThemeContrast, ThemeFamily, ThemeMode,
 };
 
 use super::tokens::{self, Shadow};
@@ -233,5 +233,6 @@ pub fn recipe(mode: ThemeMode) -> ComponentMetrics {
         },
         segmented: ControlMetrics::default(),
         kbd: ControlMetrics::default(),
+        scrollbar: ScrollbarMetrics::default(),
     }
 }
