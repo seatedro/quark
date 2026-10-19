@@ -905,8 +905,6 @@ mod tests {
         assert_eq!((rect.width, lines.len()), (natural, 1));
     }
 
-    // Catches a label that wraps beside fractional padding at 110% zoom:
-    // its box came out at 41.999996 for a max-content width of 42.
     #[test]
     fn a_label_sized_to_fit_stays_on_one_line_at_fractional_zoom() {
         let zoom = 1.1;

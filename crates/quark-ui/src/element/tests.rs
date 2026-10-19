@@ -647,8 +647,6 @@ fn rounded_overflow_hidden_emits_rounded_clip() {
     );
 }
 
-// A child's background painted over the parent's border where the
-// corners curve: the clip took the outer edge and radii.
 #[test]
 fn overflow_hidden_clips_inside_the_border() {
     let mut ts = TestText::new();

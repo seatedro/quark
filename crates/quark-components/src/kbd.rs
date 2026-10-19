@@ -9,12 +9,10 @@ pub fn kbd(label: impl Into<String>, theme: &Theme) -> AnyElement {
     keycap(label_text(label.into(), theme), theme)
 }
 
-/// A keycap showing an icon, for keys such as arrows and Return whose
-/// symbols the mono font lacks.
 pub fn kbd_icon(svg: &'static str, theme: &Theme) -> AnyElement {
     let scale = theme.metrics.ui_scale();
     let size = theme.components.kbd.icon_size.unwrap_or(Ico::XS) * scale;
-    // An empty label beside the icon keeps the height of a text keycap.
+    // Keeps the height of a text keycap.
     let content = div()
         .flex_row()
         .items_center()

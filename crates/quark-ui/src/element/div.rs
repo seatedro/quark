@@ -1431,8 +1431,7 @@ impl Element for Div {
         }
 
         if should_clip {
-            // Inside the border, as CSS clips to the padding box, so
-            // children do not paint over it.
+            // The padding box, as in CSS.
             let [t, right, b, l] = border_widths;
             let inner = Rect {
                 x: bounds.x + l,
