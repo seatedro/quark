@@ -66,6 +66,10 @@ pub(super) fn ceil_to_pixels(v: f32, scale: f32) -> f32 {
     (v * scale).ceil() / scale
 }
 
+/// Float error can leave a box a hair under the max-content width it was
+/// sized to, in device pixels.
+const FIT_SLACK_PX: f32 = 0.01;
+
 fn floor_to_pixels(v: f32, scale: f32) -> f32 {
     let scale = grid(scale);
     (v * scale).floor() / scale
@@ -160,7 +164,8 @@ impl TextMeasure {
     /// device pixels, and the snapped width is never below the floor of the
     /// measured one, so the wrapped lines fit the painted box.
     fn wrap_width(&self, width: f32) -> Option<f32> {
-        (width < self.max_content()).then(|| floor_to_pixels(width, self.scale()).max(1.0))
+        let slack = FIT_SLACK_PX / grid(self.scale());
+        (width < self.max_content() - slack).then(|| floor_to_pixels(width, self.scale()).max(1.0))
     }
 }
 

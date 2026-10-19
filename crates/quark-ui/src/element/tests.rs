@@ -647,6 +647,45 @@ fn rounded_overflow_hidden_emits_rounded_clip() {
     );
 }
 
+#[test]
+fn overflow_hidden_clips_inside_the_border() {
+    let mut ts = TestText::new();
+    let mut store = SignalStore::new();
+    let mut cx = test_cx(&mut ts, &mut store);
+    let mut scene = Scene::default();
+
+    let mut root = div()
+        .w(200.0)
+        .h(40.0)
+        .overflow_hidden()
+        .rounded(8.0)
+        .border(Color::rgba(255, 0, 0, 255))
+        .child(div().w_full().h_full().bg(Color::rgba(0, 0, 255, 255)))
+        .into_any();
+    render_element(&mut root, &mut scene, &mut cx, 200.0, 40.0);
+
+    let clip = scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            quark_render::Primitive::ClipStart(c) => Some(*c),
+            _ => None,
+        })
+        .expect("should emit a ClipStart");
+    assert_eq!(
+        (clip.rect, clip.corner_radii),
+        (
+            Rect {
+                x: 1.0,
+                y: 1.0,
+                width: 198.0,
+                height: 38.0,
+            },
+            [7.0; 4]
+        )
+    );
+}
+
 // -- New tests --
 
 #[test]

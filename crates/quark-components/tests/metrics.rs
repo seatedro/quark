@@ -10,12 +10,14 @@ use quark::{Color, Rect};
 use quark_components::toast::compute_toast_height;
 use quark_components::{
     Button, ButtonSize, ButtonStyle, Modal, SegmentedControl, SegmentedItem, SelectOption,
-    SelectState, Toast, ToastLayout, ToastStack, TooltipSide, popover_panel, select, tooltip_layer,
+    SelectState, Toast, ToastLayout, ToastStack, TooltipSide, kbd, kbd_icon, popover_panel, select,
+    tooltip_layer,
 };
 use quark_render::{Primitive, Scene};
 use quark_ui::Action;
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{AnyElement, ElementContext, IntoAnyElement, div, render_element};
+use quark_ui::icons::lucide;
 use quark_ui::style::Styled;
 use quark_ui::theme::{ComponentMetrics, ControlMetrics, Elevation, SurfaceMetrics, Theme};
 
@@ -118,10 +120,9 @@ fn recipe_sizes_scale_once_at_every_zoom() {
         let painted = paint(&theme, modal.into_any());
         let (panel, body) = (bounds(&painted, "modal"), bounds(&painted, "body"));
         assert_eq!(body.x - panel.x, at(16.0), "modal inset at {zoom}");
-        // Plus the panel's 1-point bottom border.
         assert_eq!(
             panel.y + panel.height - (body.y + body.height),
-            at(20.0) + 1.0,
+            at(20.0),
             "modal bottom padding at {zoom}"
         );
     }
@@ -284,4 +285,26 @@ fn toast_title_wider_than_the_toast_truncates_before_the_close_button() {
         "title ends at {right}, close at {}",
         close.x
     );
+}
+
+#[test]
+fn icon_keycaps_match_text_keycaps() {
+    for zoom in [1.0, 1.25] {
+        let theme = Theme::default_light().with_ui_scale(zoom);
+        let row = div()
+            .flex_row()
+            .items_start()
+            .child(div().test_id("text").child(kbd("K", &theme)))
+            .child(
+                div()
+                    .test_id("icon")
+                    .child(kbd_icon(lucide::ARROW_UP, &theme)),
+            );
+        let painted = paint(&theme, row.into_any());
+        assert_eq!(
+            bounds(&painted, "icon").height,
+            bounds(&painted, "text").height,
+            "at {zoom}"
+        );
+    }
 }

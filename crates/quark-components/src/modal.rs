@@ -100,6 +100,8 @@ impl RenderOnce for Modal {
         // once. Scaling them here as well grew them by the square.
         let padding_x = self.padding.or(recipe.padding_x).unwrap_or(Sp::XXL);
         let padding_y = self.padding.or(recipe.padding_y).unwrap_or(Sp::XXL);
+        // The border takes layout space, so take it out of the padding.
+        let (padding_x, padding_y) = (padding_x - 1.0 / scale, padding_y - 1.0 / scale);
         let gap = self.gap.or(recipe.gap).unwrap_or(Sp::LG);
         let radius = recipe.radius.unwrap_or(Rad::XXXL);
         let shadows = crate::popover::Shadows::new(recipe.shadow, Shadow::MODAL, scale);
@@ -141,7 +143,7 @@ impl RenderOnce for Modal {
                 gap={gap}
                 bg={tc.elevated_surface}
                 rounded={radius}
-                border_b={tc.border}
+                border={tc.border}
                 shadow_preset={shadows.layers()}
                 on:click={quark_ui::element::NoopAction}
                 id={format!("modal:{accessibility_label}")}
