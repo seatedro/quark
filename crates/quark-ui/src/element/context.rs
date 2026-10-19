@@ -101,8 +101,7 @@ pub struct ElementContext<'a> {
     /// Whether to build accessibility nodes: off while no assistive tech
     /// listens, so frames do not build labels nobody reads.
     accessibility_enabled: bool,
-    /// How many enclosing elements hide their subtree from assistive tech
-    /// (`Div::accessibility_hidden`); while nonzero, no node is published.
+    /// Nesting depth of `Div::accessibility_hidden`.
     accessibility_hidden_depth: u32,
 }
 
@@ -479,8 +478,8 @@ impl<'a> ElementContext<'a> {
             .unwrap_or(false)
     }
 
-    /// Hide everything painted until [`Self::pop_accessibility_hidden`],
-    /// nodes and text alike, from the accessibility tree.
+    /// Hide what paints until [`Self::pop_accessibility_hidden`] from
+    /// assistive tech.
     pub fn push_accessibility_hidden(&mut self) {
         self.accessibility_hidden_depth += 1;
     }

@@ -113,17 +113,14 @@ pub fn tab_bar(items: Vec<TabItem>) -> TabBar {
 }
 
 impl TabBar {
-    /// Stretch the tabs to share the bar's width; implies
-    /// [`Self::full_width`].
+    /// Stretch the tabs to share the bar's width. Implies `full_width`.
     pub fn fill(mut self) -> Self {
         self.fill = true;
         self.full_width = true;
         self
     }
 
-    /// Make the bar as wide as its parent, so its bottom border runs under
-    /// the whole row rather than stopping at the last tab. In a row it
-    /// still shrinks to leave its siblings their room.
+    /// Make the bar as wide as its parent, so its border spans the row.
     pub fn full_width(mut self) -> Self {
         self.full_width = true;
         self

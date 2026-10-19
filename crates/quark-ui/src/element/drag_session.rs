@@ -558,11 +558,11 @@ mod tests {
     struct TabDrag(DragPreview);
 
     impl DragHandler for TabDrag {
-        fn on_move(&mut self, _x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
+        fn on_move(&mut self, _x: f32, _y: f32) -> Vec<Action> {
             Vec::new()
         }
 
-        fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+        fn on_release(&mut self) -> DragReleaseResult {
             DragReleaseResult::empty()
         }
 

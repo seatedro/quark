@@ -683,8 +683,6 @@ pub trait Styled: Sized {
         self
     }
 
-    // Margins take any sign: a negative margin pulls the box outward, as in CSS.
-
     fn m(mut self, v: f32) -> Self {
         let l = taffy::LengthPercentageAuto::length(v);
         self.element_style_mut().layout.margin = taffy::Rect {

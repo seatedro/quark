@@ -404,12 +404,12 @@ impl DragHandler for RichTextDrag {
         self.changed()
     }
 
-    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
         self.state.extend(self.region.hit(x, y).get());
         self.changed()
     }
 
-    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+    fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult {
             actions: Vec::new(),
         }

@@ -63,9 +63,8 @@ pub fn picker_list<T: PickerItem>(
     let list_h = virtual_list_total_extent(visible_count, row_h, gap);
     let total_h = virtual_list_total_extent(entries.len(), row_h, gap);
     let scroll = scroll_top_px.min((total_h - list_h).max(0.0));
-    // Build only the rows in view; spacers stand in for the rest. The
-    // column's gap also follows the top spacer, so that spacer leaves out
-    // the gap before the first built row.
+    // Only rows in view are built. The column adds a gap after the top
+    // spacer, so the spacer leaves one out.
     let window = virtual_list_window(entries.len(), scroll, list_h, row_h, gap, OVERSCAN);
     let top_spacer = (window.top_spacer - gap).max(0.0);
     let bottom_spacer = window.bottom_spacer;

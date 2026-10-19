@@ -5,13 +5,10 @@ use quark_ui::element::*;
 use quark_ui::style::Styled;
 use quark_ui::theme::Theme;
 
-/// A keycap: `label` in a quiet outline, sized by the theme's
-/// [`ComponentMetrics::kbd`](quark_ui::theme::ComponentMetrics) recipe.
 pub fn kbd(label: impl Into<String>, theme: &Theme) -> AnyElement {
     let tc = &theme.colors;
     let scale = theme.metrics.ui_scale();
     let label = label.into();
-    // Unscaled, like the defaults: this view scales its padding and radius.
     let recipe = theme.components.kbd;
     let px = recipe.padding_x.unwrap_or(Sp::SM);
     let py = recipe.padding_y.unwrap_or(Sp::XXS);

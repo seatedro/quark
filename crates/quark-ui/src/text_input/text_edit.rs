@@ -17,9 +17,6 @@ use super::view::HorizontalScroll;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextEditCommand {
     InsertText(String),
-    /// A line break at the caret, over any selection, as typed text: Return
-    /// in an editor. Single-line fields ignore it, as does an editor while
-    /// an IME composition shows (the IME's own Return ends that).
     InsertNewline,
     Backspace,
     BackspaceWord,

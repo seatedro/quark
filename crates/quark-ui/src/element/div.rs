@@ -567,9 +567,7 @@ impl Div {
         self
     }
 
-    /// Take focus as `target` like [`Self::focus_ring`], but never paint
-    /// the ring: for elements that show focus their own way, or hold focus
-    /// only to receive keys. `focus-visible:` styles still apply.
+    /// [`Self::focus_ring`] without the ring.
     pub fn focus_target(mut self, target: FocusId) -> Self {
         self.focus_target = Some(target);
         self.paints_focus_ring = false;

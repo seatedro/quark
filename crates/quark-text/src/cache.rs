@@ -247,9 +247,8 @@ pub struct LayoutCacheMemory {
 /// Default [`LayoutCache`] entry cap.
 const DEFAULT_MAX_ENTRIES: usize = 8192;
 
-/// Whether misses run the O(entries) cache walk: debug builds with the
-/// `integrity-checks` feature, and this crate's tests. Without it a debug
-/// build with thousands of cached rows would walk them all on every miss.
+/// Whether misses run the O(entries) integrity check: debug builds with
+/// the `integrity-checks` feature, and this crate's tests.
 const FULL_INTEGRITY_CHECKS: bool = cfg!(all(
     debug_assertions,
     any(test, feature = "integrity-checks")

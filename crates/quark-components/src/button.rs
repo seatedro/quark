@@ -14,8 +14,6 @@ pub enum ButtonStyle {
     Subtle,
     Ghost,
     Danger,
-    /// A secondary action: transparent, in a border that strengthens on
-    /// hover.
     Outline,
 }
 
@@ -112,9 +110,7 @@ impl Button {
         self
     }
 
-    /// A fixed focus target, so the app can move focus to the button.
-    /// Without one, the button is known by its action and accessible name,
-    /// and its focus does not survive a change to either.
+    /// Lets the app move focus to the button.
     pub fn focus_id(mut self, id: FocusId) -> Self {
         self.focus_id = Some(id);
         self
@@ -184,12 +180,10 @@ impl RenderOnce for Button {
                 tc.text,
             ),
         };
-        // At rest, and on hover.
+        // (rest, hover) border colors.
         let border =
             (self.variant == ButtonStyle::Outline).then_some((tc.border_variant, tc.border));
-        // The 1pt border takes layout space: take it out of the padding, in
-        // the unscaled units this view scales, so outlined buttons are as
-        // tall as the rest.
+        // The border takes layout space, so take it out of the padding.
         let border_inset = if border.is_some() { 1.0 / scale } else { 0.0 };
 
         let disabled = self.disabled;
@@ -218,7 +212,6 @@ impl RenderOnce for Button {
             self.on_click
         };
         let tooltip_text = self.tooltip;
-        // A disabled button takes no focus, so it keeps no target either.
         let focus_id = self.focus_id.filter(|_| !disabled);
         let cursor = if disabled {
             CursorHint::Default

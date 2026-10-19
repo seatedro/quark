@@ -14,7 +14,7 @@ use quark_ui::accessibility::NumericValue;
 use quark_ui::design::Alpha;
 use quark_ui::element::{
     AnyElement, Bounds, ClickEvent, CursorHint, DragHandler, DragReleaseResult, Element,
-    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, Mods, RenderOnce, div, text,
+    ElementContext, IntoAnyElement, LayoutEngine, LayoutId, RenderOnce, div, text,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::Color;
@@ -87,8 +87,7 @@ impl Slider {
         self
     }
 
-    /// The unfilled part of the track. Defaults to the theme's
-    /// `slider_track`.
+    /// The unfilled part of the track.
     pub fn track_color(mut self, color: Color) -> Self {
         self.track_color = Some(color);
         self
@@ -170,8 +169,7 @@ impl RenderOnce for Slider {
         let value_text = format!("{value:.*}", range.decimals());
         let rest = self.track_color.unwrap_or(tc.slider_track);
         let (fill, rest, knob) = if self.disabled {
-            // Dimmed so a disabled track stays apart from its fill, which
-            // takes `text_disabled` like the knob.
+            // Dimmed to stay distinct from the disabled fill.
             (
                 tc.text_disabled,
                 rest.with_alpha(Alpha::MUTED),
@@ -310,11 +308,11 @@ impl DragHandler for SliderDrag {
         self.emit(self.press_x)
     }
 
-    fn on_move(&mut self, x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, _y: f32) -> Vec<Action> {
         self.emit(x)
     }
 
-    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+    fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult::empty()
     }
 

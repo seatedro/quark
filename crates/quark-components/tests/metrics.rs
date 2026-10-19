@@ -127,9 +127,6 @@ fn recipe_sizes_scale_once_at_every_zoom() {
     }
 }
 
-// Catches the outline's border adding to a button's size (it takes layout
-// space), and a segmented control's inset landing on fractional points at
-// a zoom like 81.25%, which left it lopsided.
 #[test]
 fn outlined_buttons_match_and_segmented_insets_are_whole_points() {
     for zoom in [0.8125, 1.0, 1.25] {

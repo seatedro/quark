@@ -25,7 +25,7 @@ use accesskit::Role;
 use quark::selection::{FULL_INTEGRITY_CHECKS, count_integrity_steps};
 use quark::view;
 use quark_ui::element::{
-    AnyElement, CacheKey, ClickEvent, DragHandler, DragReleaseResult, IntoAnyElement, Mods,
+    AnyElement, CacheKey, ClickEvent, DragHandler, DragReleaseResult, IntoAnyElement,
     ScrollActionBuilder, ScrollbarVisibility, WHEEL_LINE_PX, cached, div, inputs_hash, svg_icon,
     text,
 };
@@ -1624,13 +1624,13 @@ impl DragHandler for RowDrag {
         vec![(self.on_event)(TreeEvent::Press(self.node))]
     }
 
-    fn on_move(&mut self, _x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
+    fn on_move(&mut self, _x: f32, y: f32) -> Vec<Action> {
         vec![(self.on_event)(TreeEvent::DragMove {
             dy: y - self.press_y,
         })]
     }
 
-    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+    fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.on_event)(TreeEvent::DragEnd)],
         }

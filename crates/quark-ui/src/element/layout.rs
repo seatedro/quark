@@ -45,7 +45,7 @@ impl ElementContext<'_> {
     }
 }
 
-/// `scale` as a pixel grid: device pixels per point, 1 when unusable.
+/// `scale`, or 1 if it is not positive and finite.
 fn grid(scale: f32) -> f32 {
     if scale.is_finite() && scale > 0.0 {
         scale
@@ -54,8 +54,7 @@ fn grid(scale: f32) -> f32 {
     }
 }
 
-/// `v` points rounded to the nearest device pixel at `scale`, halves away
-/// from zero as taffy rounds; at scale 1, whole points.
+/// `v` points rounded to the nearest device pixel at `scale`.
 pub(super) fn round_to_pixels(v: f32, scale: f32) -> f32 {
     let scale = grid(scale);
     (v * scale).round() / scale
@@ -337,8 +336,7 @@ pub struct LayoutEngine {
     replay_memo: Vec<MeasureMemo>,
     /// Cache slots whose replayed memo missed a query this frame.
     stale: Vec<u32>,
-    /// Device pixels per point of the last pass, whose grid
-    /// [`Self::layout_bounds`] snaps edges to.
+    /// Device pixels per point of the last pass.
     scale: f32,
 }
 
@@ -350,8 +348,7 @@ impl Default for LayoutEngine {
 
 impl LayoutEngine {
     pub fn new() -> Self {
-        // Taffy rounds to whole points; bounds round to device pixels
-        // instead (see `layout_bounds`), so the tree keeps exact layout.
+        // `layout_bounds` snaps to device pixels itself.
         let mut tree = taffy::TaffyTree::new();
         tree.disable_rounding();
         Self {
@@ -668,12 +665,7 @@ impl LayoutEngine {
     }
 
     /// Get the resolved bounds for a layout node, in absolute coordinates.
-    ///
-    /// Each edge is the exact absolute edge rounded to the device pixel
-    /// grid, as taffy rounds to whole points: a size is the difference of
-    /// its rounded edges, so boxes that touch exactly share a rounded edge
-    /// and a child's edges round as its parent's do. At scale 1 the bounds
-    /// are whole points.
+    /// Edges snap to device pixels, so boxes that touch share an edge.
     pub fn layout_bounds(&self, id: LayoutId) -> Bounds {
         let size = self.tree.layout(id).expect("invalid layout id").size;
         let (x, y) = self.origin(id);
@@ -731,9 +723,8 @@ impl LayoutEngine {
     /// Width and height of what a scroll container at `id` scrolls over:
     /// the far edges of its laid-out children plus its end padding, at
     /// least its own size.
-    ///
-    /// Snapped as the container's own bounds are, so content that fits
-    /// measures exactly the container's snapped size and scrolls nowhere.
+    /// Snapped like the container's bounds, so content that fits does not
+    /// scroll.
     pub fn scroll_content_size(&self, id: LayoutId) -> (f32, f32) {
         let layout = self.tree.layout(id).expect("invalid layout id");
         let content = layout.content_size;
@@ -1040,9 +1031,6 @@ mod tests {
         }
     }
 
-    // Regression: layout rounded to whole points, so at 2x a 1.625pt
-    // padding inside a box at a fractional offset came out 2pt on one
-    // side and 1pt on the other, a two device pixel lopsided inset.
     #[test]
     fn fractional_padding_insets_evenly_on_the_device_grid() {
         let mut text = TextSystem::vendored_only(&Default::default());

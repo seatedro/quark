@@ -213,12 +213,8 @@ pub trait UiApp: 'static {
     /// handling (clicks, wheel, keys, text editing, Tab focus traversal).
     /// A transport moving the drag session ([`UiContext::update_drag`])
     /// hooks pointer input here.
-    ///
-    /// Typed text and IME commits ([`InputEvent::TextInput`],
-    /// [`InputEvent::ImeCommit`]) reach the adapter only for a focused text field painted last frame.
-    /// An element that takes text some other way (a terminal, a canvas
-    /// with a `focus_ring` or `focus_target`) reads it here; text this
-    /// passes on with nothing to receive it is dropped, with a debug log.
+    /// Elements that take typed text without a text field, like a
+    /// terminal, read it here.
     fn event(&mut self, _event: &InputEvent, _cx: &mut UiContext) -> bool {
         false
     }
@@ -1140,9 +1136,8 @@ impl<U: UiApp> UiAdapter<U> {
     }
 
     /// Keys go to the focused text field when they edit text, then to key
-    /// bindings on the focus path, then Return to a focused editor as a
-    /// newline, then to Tab focus traversal, so an editor that binds Tab
-    /// keeps it. Escape first ends a drag session.
+    /// bindings on the focus path, then to Tab focus traversal, so an
+    /// editor that binds Tab keeps it. Escape first ends a drag session.
     fn key(&mut self, binding: Binding, cx: &mut EventContext) {
         // Any key shows focus from here on, also where it lands through a
         // binding or the app's own `set_focus`.
@@ -1180,9 +1175,7 @@ impl<U: UiApp> UiAdapter<U> {
             self.deliver(delivery, cx);
             return;
         }
-        // Return (or shift+Return) in an editor breaks the line. It comes
-        // after bindings so an app can bind Enter to send, and before
-        // activation so it never clicks the editor.
+        // After bindings, so an app can bind Enter to send.
         let m = binding.mods;
         if binding.key == "enter"
             && !(m.cmd || m.ctrl || m.alt || m.primary)
@@ -1320,9 +1313,7 @@ impl<U: UiApp> UiAdapter<U> {
                 if let Some(target) = self.win.focused_field() {
                     self.edit(target, TextEditCommand::InsertText(text), cx);
                 } else {
-                    // Only text fields painted last frame take text; the
-                    // app saw it first in `UiApp::event` and passed on it.
-                    // The length, not the text: it may be a password.
+                    // Only the length, since the text may be a password.
                     tracing::debug!(
                         focus = ?self.win.focus,
                         "{} chars of text input dropped: focus is not on a text field",
@@ -2017,8 +2008,6 @@ impl<U: UiApp> UiAdapter<U> {
             return;
         }
         if let Some(input) = input {
-            // Clicks and drags this input starts or moves report the
-            // modifiers held now.
             let mods = crate::input::mods_of(cx.modifiers());
             self.win.router.set_modifiers(mods);
             self.input(input, cx);
@@ -2740,8 +2729,7 @@ mod tests {
 
     const NOTES: FocusId = FocusId::from_key("notes");
 
-    /// A 300x100 editor, inside a div binding Enter to Save when
-    /// `bind_enter` is set (a chat composer sending on Enter).
+    /// An editor in a div that binds Enter to Save if `bind_enter`.
     struct NotesApp {
         editor: quark_ui::text_input::Editor,
         bind_enter: bool,
@@ -2793,8 +2781,6 @@ mod tests {
         ui
     }
 
-    // Regression: Return in an editor fell through to activation and
-    // inserted nothing, so every app had to bind it to a newline itself.
     #[test]
     fn return_in_an_editor_inserts_a_newline_that_undoes() {
         let mut ui = notes(false);
@@ -2804,15 +2790,10 @@ mod tests {
         ui.key("shift+enter");
         assert_eq!(ui.app().editor.text(), "ab\ncd\n");
         ui.key("mod+z");
-        assert!(
-            ui.app().editor.text().len() < 6,
-            "the newline is an undo step's"
-        );
+        assert!(ui.app().editor.text().len() < 6, "undo removes the newline");
         assert_eq!(ui.app().saved, 0);
     }
 
-    // An app that binds Enter (send) still gets it; shift+Enter it leaves
-    // alone breaks the line.
     #[test]
     fn an_enter_binding_wins_over_the_editor_newline() {
         let mut ui = notes(true);
@@ -2823,8 +2804,7 @@ mod tests {
         assert_eq!(ui.app().editor.text(), "ab\n");
     }
 
-    // The IME's own Return confirms its composition; a newline would drop
-    // the composition the key belongs to.
+    // Return during composition belongs to the IME.
     #[test]
     fn return_mid_composition_leaves_the_editor_alone() {
         let mut ui = notes(false);
@@ -2836,7 +2816,6 @@ mod tests {
         assert_eq!(preedit, Some("に"));
     }
 
-    // Single-line fields keep Return for submitting: no newline.
     #[test]
     fn return_in_a_single_line_field_inserts_nothing() {
         let mut ui = composer("hi");

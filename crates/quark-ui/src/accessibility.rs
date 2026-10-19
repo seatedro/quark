@@ -913,9 +913,8 @@ impl AccessibilityExtra {
 }
 
 impl Div {
-    /// Leave this div and everything inside it out of the accessibility
-    /// tree, as `aria-hidden`: for decoration, or content another node
-    /// already describes. It still paints, hit tests, and takes focus.
+    /// Hide this div and its descendants from assistive tech, like
+    /// `aria-hidden`.
     pub fn accessibility_hidden(mut self, hidden: bool) -> Self {
         self.accessibility_extra.hidden = hidden;
         self
@@ -1631,8 +1630,6 @@ mod tests {
         );
     }
 
-    // A hidden div drops its own node, its descendants' nodes, and their
-    // text; its siblings publish as before.
     #[test]
     fn accessibility_hidden_drops_the_subtree() {
         use crate::element::{div, text};

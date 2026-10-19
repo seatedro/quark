@@ -19,8 +19,8 @@ use quark_app::platform::drawn_menu::{DrawnMenuBar, MenuPick};
 use quark_app::platform::menu::{Menu, MenuAction, MenuItem, MenuRole, native_menu_bar};
 use quark_app::quark_ui::design::Ico;
 use quark_app::quark_ui::element::{
-    AnyElement, DragHandler, DragReleaseResult, IntoAnyElement, Mods, ScrollHandle, div,
-    sticky_section, svg_icon, text,
+    AnyElement, DragHandler, DragReleaseResult, IntoAnyElement, ScrollHandle, div, sticky_section,
+    svg_icon, text,
 };
 use quark_app::quark_ui::icons::lucide;
 use quark_app::quark_ui::key_context::KeyBindings;
@@ -308,14 +308,14 @@ impl DragOutRow {
 }
 
 impl DragHandler for DragOutRow {
-    fn on_move(&mut self, _x: f32, _y: f32, _modifiers: Mods) -> Vec<Action> {
+    fn on_move(&mut self, _x: f32, _y: f32) -> Vec<Action> {
         if std::mem::replace(&mut self.sent, true) {
             return Vec::new();
         }
         vec![Msg::DragOut(self.file).into()]
     }
 
-    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+    fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult::empty()
     }
 

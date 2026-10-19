@@ -73,8 +73,7 @@ impl RenderOnce for SegmentedControl {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();
-        // Scaled here and rounded to whole points, so the inset is even on
-        // every side at any zoom.
+        // Rounded so the inset is even on every side.
         let recipe = cx.theme.components.segmented;
         let scaled = |v: Option<f32>, default: f32| (v.unwrap_or(default) * scale).round();
         let inset = scaled(recipe.gap, Sp::XXS);
@@ -131,11 +130,9 @@ impl RenderOnce for SegmentedControl {
                         class="cursor-pointer"
                         on:click={item.action}
                         @when {height.is_some()} { h={height.unwrap()} pt={0.0} pb={0.0} }
-                        // A solid fill one step above the track, apart from
-                        // the tinted hover of the other segments.
                         @when {item.selected} { bg={tc.element_hover} }
                         // One `hover` for both: each `hover_*` helper
-                        // replaces the hover style the last one set.
+                        // replaces the last one's style.
                         @when {!item.selected} {
                             hover={|s| s.bg(tc.ghost_element_hover).text_color(tc.text)}
                         }

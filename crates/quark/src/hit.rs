@@ -40,8 +40,7 @@ pub enum HitIdentity {
     OverlayBackdrop,
 }
 
-/// Modifier keys: those of a key binding, or those held during a click or
-/// a drag.
+/// Modifier keys of a key binding or a click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Mods {
     pub cmd: bool,
@@ -53,8 +52,7 @@ pub struct Mods {
     pub primary: bool,
 }
 
-/// A pointer click at a specific position, in hit table coordinates, with
-/// the modifier keys held when it pressed.
+/// A pointer click at a specific position, in hit table coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct ClickEvent {
     pub x: f32,

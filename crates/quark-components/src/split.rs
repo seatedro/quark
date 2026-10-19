@@ -21,7 +21,7 @@ use quark::view;
 use quark_ui::accessibility::{NumericActions, NumericValue, Orientation};
 use quark_ui::element::{
     AnyElement, CacheKey, ClickEvent, CursorHint, DragHandler, DragReleaseResult, IntoAnyElement,
-    Mods, cached, div,
+    cached, div,
 };
 use quark_ui::style::Styled;
 use quark_ui::theme::{Theme, ThemeColors};
@@ -863,7 +863,7 @@ impl DragHandler for DividerDrag {
         })]
     }
 
-    fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
+    fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
         let at = if self.horizontal { x } else { y };
         vec![(self.map)(SplitEvent::Drag {
             divider: self.divider,
@@ -872,7 +872,7 @@ impl DragHandler for DividerDrag {
         })]
     }
 
-    fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+    fn on_release(&mut self) -> DragReleaseResult {
         DragReleaseResult {
             actions: vec![(self.map)(SplitEvent::Release {
                 divider: self.divider,
@@ -883,7 +883,7 @@ impl DragHandler for DividerDrag {
     /// The panes follow the pointer as it moves, so cancelling keeps the
     /// sizes dragged to and settles them, like a release.
     fn on_cancel(&mut self) -> Vec<Action> {
-        self.on_release(Mods::default()).actions
+        self.on_release().actions
     }
 
     fn cursor(&self) -> CursorHint {

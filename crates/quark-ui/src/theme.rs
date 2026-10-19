@@ -123,9 +123,6 @@ tokens! {
         empty_state_background,
         empty_state_border,
         scrollbar_thumb,
-        /// The unfilled part of a slider's track: a step off every surface
-        /// and control fill, so the track stays visible on cards and in
-        /// modals.
         slider_track,
         status_info,
         status_warning,
@@ -175,18 +172,12 @@ tokens! {
         mono_font_size,
         ui_row_height,
         code_row_height,
-        /// How far the other metrics are scaled from their 100% values; 1.0
-        /// is 100%. Components scale their own fixed sizes (padding, icons,
-        /// [`ComponentMetrics`]) by it through [`ThemeMetrics::ui_scale`],
-        /// so body text can shrink without shrinking every control.
         zoom,
     }
 }
 
 impl ThemeMetrics {
-    /// Desktop density at 100% zoom: 13-point body text, 30-point rows,
-    /// and a 24-point status bar. Pair with [`ComponentMetrics::compact`],
-    /// or use [`Theme::compact`] for both.
+    /// Desktop density: 13-point text and 30-point rows.
     pub fn compact() -> Self {
         Self {
             title_bar_height: 36.0,
@@ -209,13 +200,10 @@ impl ThemeMetrics {
         }
     }
 
-    /// The factor components multiply their fixed sizes by: [`Self::zoom`],
-    /// floored so a tiny zoom keeps controls usable.
     pub fn ui_scale(&self) -> f32 {
         self.zoom.max(0.7)
     }
 
-    /// Every metric, zoom included, times `scale` (clamped to 0.5..=4).
     pub fn scaled(self, scale: f32) -> Self {
         let scale = scale.clamp(0.5, 4.0);
         Self {
@@ -242,10 +230,8 @@ impl ThemeMetrics {
 
 /// Optional sizes for one kind of control, in logical points at 100% zoom.
 ///
-/// Components multiply a set value by [`ThemeMetrics::ui_scale`] (the
-/// zoom) once, as they do their own defaults, so a recipe can ask for
-/// 13-point control text at any zoom. `None` keeps the component's
-/// default.
+/// Components multiply a set value by [`ThemeMetrics::ui_scale`] once, as
+/// they do their own defaults. `None` keeps the component's default.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ControlMetrics {
     pub height: Option<f32>,
@@ -325,17 +311,14 @@ pub struct ComponentMetrics {
     /// Form fields: `font_size` for the label, `gap` between label, control,
     /// and message.
     pub field: ControlMetrics,
-    /// Segmented controls: `height` and `padding_x` per segment, `gap` the
-    /// track's inset around and between segments, `radius` the track's
-    /// (segments follow it, less the inset).
+    /// Segmented controls: `gap` is the track's inset around each segment.
     pub segmented: ControlMetrics,
-    /// Keycaps from `kbd`, including search fields' shortcut hints.
+    /// Keycaps, including search field hints.
     pub kbd: ControlMetrics,
 }
 
 impl ComponentMetrics {
-    /// Control recipes for [`ThemeMetrics::compact`]: 26-point controls
-    /// and list rows with 13-point text, 22-point compact buttons.
+    /// Recipes to pair with [`ThemeMetrics::compact`].
     pub fn compact() -> Self {
         let control = ControlMetrics {
             height: Some(26.0),
@@ -441,15 +424,12 @@ impl Theme {
         }
     }
 
-    /// Zoom by `scale`: every metric, and through
-    /// [`ThemeMetrics::ui_scale`] every component size, grows with it.
     pub fn with_ui_scale(mut self, scale: f32) -> Self {
         self.metrics = self.metrics.scaled(scale);
         self
     }
 
-    /// This theme at desktop density ([`ThemeMetrics::compact`] and
-    /// [`ComponentMetrics::compact`]), keeping its zoom and colors.
+    /// Switch to the compact metrics, keeping zoom and colors.
     pub fn compact(mut self) -> Self {
         self.metrics = ThemeMetrics::compact().scaled(self.metrics.zoom);
         self.components = ComponentMetrics::compact();
@@ -1292,9 +1272,6 @@ mod tests {
         }
     }
 
-    // Catches a slider's empty track vanishing into a card or modal, as it
-    // did in `element_background`, the same color as the dark theme's
-    // raised surfaces.
     #[test]
     fn standard_slider_tracks_stand_apart_from_surfaces() {
         for theme in [Theme::default_dark(), Theme::default_light()] {
@@ -1319,8 +1296,6 @@ mod tests {
         }
     }
 
-    // Catches body text size driving zoom again: 13-point text used to
-    // shrink every control's padding and recipe to 81%.
     #[test]
     fn zoom_is_independent_of_body_text_size() {
         let mut theme = Theme::default_light();

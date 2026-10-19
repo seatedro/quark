@@ -59,12 +59,9 @@ pub struct SyntaxSpan {
 /// after the text changes, and only in code modes.
 pub type SyntaxHighlighter = Arc<dyn Fn(&str) -> Vec<SyntaxSpan> + Send + Sync>;
 
-/// Produces display formatting for the full editor text in prose modes,
-/// such as a bold commit subject. Called lazily on flush after the text
-/// changes. Its spans only style the layout: they are not part of the
-/// text, so they never enter undo, move the caret, or show up in
-/// [`Editor::rich_text`]. Only the style flags apply; links come from the
-/// text's own formatting.
+/// Produces display styles for the full editor text, called lazily after
+/// the text changes, and only in prose modes. They stay out of undo and
+/// [`Editor::rich_text`].
 pub type StyleHighlighter = Arc<dyn Fn(&str) -> Vec<StyleSpan> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -295,11 +292,9 @@ pub(super) fn style_layout_spans(styles: &[StyleSpan]) -> (Vec<TextSpan>, Vec<Sy
     (spans, kinds)
 }
 
-/// The text's own formatting with the highlighter's style flags added,
-/// as one sorted run list without overlaps: layout spans override each
-/// other wholesale where they overlap, so a highlighted bold over a
-/// user's italic must become one bold italic run. Highlight spans that
-/// are empty, past the text, or off a char boundary are skipped.
+/// Adds the highlight style flags to the text's own formatting. Layout
+/// spans replace each other where they overlap, so the result has no
+/// overlaps.
 pub(super) fn merge_highlight_styles(
     text: &str,
     document: &[StyleSpan],
@@ -1409,9 +1404,6 @@ mod tests {
         })
     }
 
-    // A commit subject is bold for display while staying plain text: the
-    // highlight follows edits without entering undo, moving the caret, or
-    // reaching the rich text the app reads back.
     #[test]
     fn style_highlighter_bolds_prose_for_layout_only() {
         let (mut text_system, mut editor) = make_editor(400.0, 200.0);

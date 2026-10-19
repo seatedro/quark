@@ -108,7 +108,7 @@ impl KeyChord {
     }
 }
 
-/// The modifier keys `modifiers` holds, as the element tree sees them.
+/// `modifiers` as [`Mods`].
 pub fn mods_of(modifiers: ModifiersState) -> Mods {
     Mods {
         cmd: modifiers.super_key(),

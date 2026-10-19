@@ -594,9 +594,7 @@ pub struct InputRouter {
 }
 
 impl InputRouter {
-    /// The modifier keys held from now on: clicks and drags report them
-    /// ([`ClickEvent::modifiers`], [`DragHandler::on_move`]). Hosts call
-    /// this as the keyboard's modifier state changes.
+    /// The modifier keys held now, for clicks and drags.
     pub fn set_modifiers(&mut self, modifiers: Mods) {
         self.modifiers = modifiers;
     }
@@ -826,9 +824,10 @@ impl InputRouter {
                 capture.pointer = (x, y);
                 let (dx, dy) = (x - capture.press.0, y - capture.press.1);
                 capture.moved |= dx.hypot(dy) >= DRAG_PREVIEW_THRESHOLD;
+                capture.drag.set_modifiers(self.modifiers);
                 Delivery {
                     node: capture.node,
-                    actions: capture.drag.on_move(x, y, self.modifiers),
+                    actions: capture.drag.on_move(x, y),
                     redraw: scroll_epoch() != epoch || capture.shows_preview(),
                     window_drag: false,
                 }
@@ -841,12 +840,15 @@ impl InputRouter {
     pub fn pointer_up(&mut self) -> Delivery {
         let epoch = scroll_epoch();
         match self.capture.take() {
-            Some(mut capture) => Delivery {
-                node: capture.node,
-                actions: capture.drag.on_release(self.modifiers).actions,
-                redraw: scroll_epoch() != epoch || capture.shows_preview(),
-                window_drag: false,
-            },
+            Some(mut capture) => {
+                capture.drag.set_modifiers(self.modifiers);
+                Delivery {
+                    node: capture.node,
+                    actions: capture.drag.on_release().actions,
+                    redraw: scroll_epoch() != epoch || capture.shows_preview(),
+                    window_drag: false,
+                }
+            }
             None => Delivery::default(),
         }
     }
@@ -1470,11 +1472,11 @@ mod tests {
     struct RecordDrag;
 
     impl DragHandler for RecordDrag {
-        fn on_move(&mut self, x: f32, y: f32, _modifiers: Mods) -> Vec<Action> {
+        fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
             vec![Msg::Move(x as i32, y as i32).into()]
         }
 
-        fn on_release(&mut self, _modifiers: Mods) -> DragReleaseResult {
+        fn on_release(&mut self) -> DragReleaseResult {
             DragReleaseResult {
                 actions: vec![Msg::Release.into()],
             }
@@ -1508,11 +1510,9 @@ mod tests {
         );
     }
 
-    // Clicks and drags report the modifiers held at each step, so a
-    // shift-click or an alt-drop needs no side channel.
     #[test]
     fn clicks_and_drags_report_held_modifiers() {
-        struct ModsDrag;
+        struct ModsDrag(Mods);
         fn name(m: Mods) -> &'static str {
             match (m.shift, m.alt) {
                 (true, _) => "shift",
@@ -1521,14 +1521,18 @@ mod tests {
             }
         }
         impl DragHandler for ModsDrag {
-            fn on_move(&mut self, _x: f32, _y: f32, modifiers: Mods) -> Vec<Action> {
-                vec![Msg::Click(name(modifiers)).into()]
+            fn on_move(&mut self, _x: f32, _y: f32) -> Vec<Action> {
+                vec![Msg::Click(name(self.0)).into()]
             }
 
-            fn on_release(&mut self, modifiers: Mods) -> DragReleaseResult {
+            fn on_release(&mut self) -> DragReleaseResult {
                 DragReleaseResult {
-                    actions: vec![Msg::Click(name(modifiers)).into()],
+                    actions: vec![Msg::Click(name(self.0)).into()],
                 }
+            }
+
+            fn set_modifiers(&mut self, modifiers: Mods) {
+                self.0 = modifiers;
             }
 
             fn on_cancel(&mut self) -> Vec<Action> {
@@ -1553,7 +1557,7 @@ mod tests {
                     .w(50.0)
                     .h(50.0)
                     .test_id("handle")
-                    .on_drag(|_| Box::new(ModsDrag)),
+                    .on_drag(|_| Box::new(ModsDrag(Mods::default()))),
             );
         let mut router = routed(root, 400.0, 400.0);
         let shift = Mods {
@@ -1640,12 +1644,12 @@ mod tests {
     struct TearDrag;
 
     impl DragHandler for TearDrag {
-        fn on_move(&mut self, x: f32, y: f32, modifiers: Mods) -> Vec<Action> {
-            RecordDrag.on_move(x, y, modifiers)
+        fn on_move(&mut self, x: f32, y: f32) -> Vec<Action> {
+            RecordDrag.on_move(x, y)
         }
 
-        fn on_release(&mut self, modifiers: Mods) -> DragReleaseResult {
-            RecordDrag.on_release(modifiers)
+        fn on_release(&mut self) -> DragReleaseResult {
+            RecordDrag.on_release()
         }
 
         fn on_cancel(&mut self) -> Vec<Action> {

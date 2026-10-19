@@ -640,7 +640,7 @@ impl TextBuffer {
                 Styling::Inherit,
                 EditKind::Typing,
             ),
-            // Replacing would drop the composition the key belongs to.
+            // Return during composition belongs to the IME.
             InsertNewline if self.multiline && self.preedit.is_none() => self.replace(
                 self.selection(),
                 "\n",

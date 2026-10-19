@@ -157,9 +157,6 @@ impl PickerItem for Owned {
     }
 }
 
-// Catches the picker building a row per entry (a 10,000-command palette
-// built every frame), and spacers that put the built rows somewhere other
-// than where the scroll offset says.
 #[test]
 fn picker_builds_only_rows_in_view_at_their_offsets() {
     let theme = Theme::default_dark();

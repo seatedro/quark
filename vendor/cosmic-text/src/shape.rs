@@ -1507,10 +1507,8 @@ impl ShapeLine {
     /// line wraps as if it were not there. Glyph wrapping and unwrapped
     /// layout ignore the ranges.
     ///
-    /// Every visual line after the first starts `hanging_indent` in from
-    /// the line's start edge (the left for a left-to-right line, the right
-    /// for a right-to-left one) and wraps at `width_opt` less the indent;
-    /// alignment works within that narrower room.
+    /// Visual lines after the first start `hanging_indent` in from the
+    /// start edge and wrap that much sooner.
     #[allow(clippy::too_many_arguments)]
     pub fn layout_to_buffer_keeping(
         &self,
@@ -1524,9 +1522,7 @@ impl ShapeLine {
         keep_together: &[Range<usize>],
         hanging_indent: f32,
     ) {
-        // Room on the visual line being filled: the full width until a
-        // line with glyphs is committed (a glyph wider than the width can
-        // commit an empty one first), then the width less the indent.
+        // The first line with glyphs gets the full width.
         let hanging_indent = hanging_indent.max(0.0);
         let limit = |visual_lines: &[VisualLine]| -> f32 {
             let width = width_opt.unwrap_or(f32::INFINITY);
@@ -1587,8 +1583,7 @@ impl ShapeLine {
         if let (Some(width), Wrap::Word | Wrap::WordOrGlyph, false) =
             (width_opt, wrap, keep_together.is_empty())
         {
-            // A group that fits only the first line could still land on a
-            // wrapped one, so it must fit the narrower room.
+            // Groups must fit a wrapped line.
             let room = (width - hanging_indent).max(0.0);
             self.keep_groups(keep_together, font_size, room, &mut keep_groups);
         }
@@ -1936,8 +1931,6 @@ impl ShapeLine {
             if visual_line.ranges.is_empty() {
                 continue;
             }
-            // A wrapped line starts the hanging indent in and aligns in the
-            // room left after it.
             let indent = if layout_lines.is_empty() {
                 0.0
             } else {

@@ -315,9 +315,7 @@ impl TextElement {
         self
     }
 
-    /// Starts every wrapped line `indent` pixels in, and each paragraph's
-    /// first line at the left edge: a list item's or diff line's text lines
-    /// up past its marker.
+    /// Indent every line after a paragraph's first by `indent` pixels.
     pub fn hanging_indent(mut self, indent: f32) -> Self {
         self.hanging_indent = indent;
         self
@@ -409,7 +407,6 @@ impl Element for TextElement {
         };
         let layout = cx.layout_text_query(&self.query(&self.content, font_size, explicit));
         let (layout_width, layout_height) = layout.as_ref().map_or((0.0, 0.0), |l| l.size());
-        // Whole device pixels, so the box layout snaps keeps this width.
         let text_width = ceil_to_pixels(layout_width, cx.scale_factor);
 
         let id = match (wrap, &layout) {
