@@ -1160,6 +1160,7 @@ impl Element for Div {
         }
         let radii = style.corner_radii;
         let r = style.max_corner_radius();
+        let border_widths = style.border_color.map_or([0.0; 4], |_| style.border_widths);
         let z = style.z_index;
         let opacity = style.opacity.clamp(0.0, 1.0);
         let background = style.background;
@@ -1430,10 +1431,28 @@ impl Element for Div {
         }
 
         if should_clip {
+            // Inside the border, as CSS clips to the padding box, so
+            // children do not paint over it.
+            let [t, right, b, l] = border_widths;
+            let inner = Rect {
+                x: bounds.x + l,
+                y: bounds.y + t,
+                width: (bounds.width - l - right).max(0.0),
+                height: (bounds.height - t - b).max(0.0),
+            };
             if r > 0.0 {
-                scene.clip_rounded(bounds, radii);
+                let [tl, tr, br, bl] = radii;
+                scene.clip_rounded(
+                    inner,
+                    [
+                        (tl - t.max(l)).max(0.0),
+                        (tr - t.max(right)).max(0.0),
+                        (br - b.max(right)).max(0.0),
+                        (bl - b.max(l)).max(0.0),
+                    ],
+                );
             } else {
-                scene.clip(bounds);
+                scene.clip(inner);
             }
             cx.push_paint_clip(bounds);
         }

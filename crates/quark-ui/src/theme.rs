@@ -88,11 +88,16 @@ tokens! {
         elevated_surface,
         modal_surface,
         overlay_scrim,
+        /// Separates surfaces, and outlines popovers, menus, tooltips,
+        /// toasts, modals, and text inputs.
         border,
         /// The outline that marks out a control with no fill of its own:
         /// an unchecked radio or checkbox. At least 3:1 against what it sits
         /// on (WCAG 1.4.11), unlike `border`, which separates surfaces.
         control_border,
+        /// Dividers, and the outlines of select and dropdown triggers,
+        /// search fields, segmented controls, keycaps, outline buttons, and
+        /// disabled checkboxes.
         border_variant,
         focus_border,
         text,

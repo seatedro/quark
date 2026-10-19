@@ -66,6 +66,10 @@ pub(super) fn ceil_to_pixels(v: f32, scale: f32) -> f32 {
     (v * scale).ceil() / scale
 }
 
+/// How far under its max-content width, in device pixels, a text box can
+/// be and still lay out on one line.
+const FIT_SLACK_PX: f32 = 0.01;
+
 fn floor_to_pixels(v: f32, scale: f32) -> f32 {
     let scale = grid(scale);
     (v * scale).floor() / scale
@@ -159,8 +163,13 @@ impl TextMeasure {
     /// The width is floored to device pixels: layout snaps box edges to
     /// device pixels, and the snapped width is never below the floor of the
     /// measured one, so the wrapped lines fit the painted box.
+    ///
+    /// Flex arithmetic in `f32` can leave a box sized to the max-content
+    /// width a hair under it (41.999996 for 42), so a width within
+    /// [`FIT_SLACK_PX`] of it still fits.
     fn wrap_width(&self, width: f32) -> Option<f32> {
-        (width < self.max_content()).then(|| floor_to_pixels(width, self.scale()).max(1.0))
+        let slack = FIT_SLACK_PX / grid(self.scale());
+        (width < self.max_content() - slack).then(|| floor_to_pixels(width, self.scale()).max(1.0))
     }
 }
 

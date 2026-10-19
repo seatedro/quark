@@ -905,6 +905,25 @@ mod tests {
         assert_eq!((rect.width, lines.len()), (natural, 1));
     }
 
+    // Catches a label that wraps beside fractional padding at 110% zoom:
+    // its box came out at 41.999996 for a max-content width of 42.
+    #[test]
+    fn a_label_sized_to_fit_stays_on_one_line_at_fractional_zoom() {
+        let zoom = 1.1;
+        let mut window = Window::new();
+        let frame = window.paint(
+            div().flex_row().child(
+                div()
+                    .flex_row()
+                    .px(6.0 * zoom)
+                    .gap(4.0 * zoom)
+                    .child(div().w(14.0 * zoom).h(14.0 * zoom))
+                    .child(text("Sign in").size(12.0 * zoom)),
+            ),
+        );
+        assert_eq!(frame.texts[0].1, ["Sign in"]);
+    }
+
     // Catches the node keeping a size measured for another width: the same
     // tree in a narrower container lays out as a fresh window would.
     #[test]
