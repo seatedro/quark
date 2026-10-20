@@ -263,3 +263,13 @@ allocations they remove):
   `drawing_another_variable_font_first_changes_no_glyph` checks it. Worth
   reporting to swash, whose `variations` could reset the coordinates it
   resizes.
+- Weight on a nonstandard `wght` axis (`src/font/mod.rs`, `src/swash.rs`):
+  `wght_coordinate` picks the `wght` value for a CSS weight, and `Font`
+  keeps it (`Font::wght`) for shaping, metrics, and `swash_image`. Upstream
+  clamps the weight to the axis, so Berkeley Mono (axis 100 to 150) drew
+  normal text at 150, its Bold. When the face's OS/2 weight
+  class lies outside the axis, the weight is interpolated between the
+  default (at the weight class) and the named instances whose names are
+  standard weights; otherwise it is clamped as before. quark-text's
+  `wght_off_the_css_scale_maps_through_named_instances` checks it. Could
+  go upstream as is.

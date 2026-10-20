@@ -168,7 +168,7 @@ impl PreparedFont {
     }
 
     /// Every axis the face has, sorted by tag, at the value shaping used:
-    /// `wght` at the text's weight clamped to the axis, every other axis
+    /// `wght` at the text's weight mapped onto the axis, every other axis
     /// (`opsz` included) at its default, as harfrust shapes it. Apply all
     /// of them; a rasterizer that picks an axis value itself (an automatic
     /// optical size, say) draws glyphs shaping never measured.
@@ -224,9 +224,7 @@ struct FaceRecord {
 #[derive(Debug, Clone, Copy)]
 struct Axis {
     tag: [u8; 4],
-    min: f32,
     default: f32,
-    max: f32,
 }
 
 impl FontRegistry {
@@ -271,7 +269,10 @@ impl FontRegistry {
         let key = (font_id, weight.0, synthesis);
         if !self.instances.contains_key(&key) {
             let prepared = self.face(font_id).map(|face| {
-                let variations = face_variations(&face.axes, weight);
+                let wght = FontRef::from_index(face.source.data(), face.face.index)
+                    .ok()
+                    .and_then(|font| cosmic_text::wght_coordinate(&font, weight));
+                let variations = face_variations(&face.axes, wght);
                 PreparedFont(Arc::new(PreparedInner {
                     instance: intern_instance(face.face, &variations, synthesis),
                     face: face.face,
@@ -312,9 +313,7 @@ fn face_record(db: &fontdb::Database, font_id: fontdb::ID) -> Result<FaceRecord,
         .iter()
         .map(|axis| Axis {
             tag: axis.tag().to_be_bytes(),
-            min: axis.min_value(),
             default: axis.default_value(),
-            max: axis.max_value(),
         })
         .collect();
     axes.sort_by_key(|axis| axis.tag);
@@ -349,16 +348,15 @@ fn face_record(db: &fontdb::Database, font_id: fontdb::ID) -> Result<FaceRecord,
 }
 
 /// Every axis at the value shaping uses: cosmic-text builds a face's
-/// harfrust instance from the text's weight on `wght` alone, which skrifa
-/// clamps to the axis, leaving the rest at their defaults.
-fn face_variations(axes: &[Axis], weight: fontdb::Weight) -> Arc<[Variation]> {
+/// harfrust instance from the text's weight on `wght` alone, leaving the
+/// rest at their defaults.
+fn face_variations(axes: &[Axis], wght: Option<f32>) -> Arc<[Variation]> {
     axes.iter()
         .map(|axis| Variation {
             tag: axis.tag,
-            value: if &axis.tag == b"wght" {
-                f32::from(weight.0).clamp(axis.min, axis.max)
-            } else {
-                axis.default
+            value: match wght {
+                Some(value) if &axis.tag == b"wght" => value,
+                _ => axis.default,
             },
         })
         .collect()
@@ -612,6 +610,57 @@ mod tests {
             let (_, font) = first_glyph(&mut system, &TextParams::new("a", style));
             let got: Vec<_> = font.variations().iter().map(|v| (v.tag, v.value)).collect();
             assert_eq!(got, expected, "{family} {weight:?}");
+        }
+    }
+
+    /// [`renamed_inter`] with its `wght` axis rescaled to 100 to 150 like
+    /// Berkeley Mono's: default 100, instances up to Regular at 100 and the
+    /// heavier ones at 150. Only `fvar` changes; OS/2 still says 400.
+    fn narrow_wght_inter() -> Vec<u8> {
+        let mut bytes = renamed_inter();
+        let font = FontRef::new(&bytes).expect("font");
+        let fvar = font
+            .table_data(cosmic_text::skrifa::Tag::new(b"fvar"))
+            .expect("fvar");
+        let start = fvar.as_bytes().as_ptr() as usize - bytes.as_ptr() as usize;
+        let u16_at =
+            |bytes: &[u8], at: usize| usize::from(u16::from_be_bytes([bytes[at], bytes[at + 1]]));
+        let fixed = |value: i32| (value << 16).to_be_bytes();
+        let axes = start + u16_at(&bytes, start + 4);
+        let axis_count = u16_at(&bytes, start + 8);
+        let axis_size = u16_at(&bytes, start + 10);
+        let instance_count = u16_at(&bytes, start + 12);
+        let instance_size = u16_at(&bytes, start + 14);
+        let wght = (0..axis_count)
+            .find(|i| &bytes[axes + i * axis_size..][..4] == b"wght")
+            .expect("wght");
+        let axis = axes + wght * axis_size;
+        for (at, value) in [(4, 100), (8, 100), (12, 150)] {
+            bytes[axis + at..axis + at + 4].copy_from_slice(&fixed(value));
+        }
+        let instances = axes + axis_count * axis_size;
+        for i in 0..instance_count {
+            let coord = instances + i * instance_size + 4 + wght * 4;
+            let old = i32::from_be_bytes(bytes[coord..coord + 4].try_into().unwrap()) >> 16;
+            let new = if old <= 400 { 100 } else { 150 };
+            bytes[coord..coord + 4].copy_from_slice(&fixed(new));
+        }
+        bytes
+    }
+
+    #[test]
+    fn wght_off_the_css_scale_maps_through_named_instances() {
+        let mut system = system_with(narrow_wght_inter());
+        for (weight, expected) in [(FontWeight::Normal, 100.0), (FontWeight::Bold, 150.0)] {
+            let style = TextStyle::new(14.0).weight(weight);
+            let (glyph, font) = first_glyph(&mut system, &TextParams::new("a", style));
+            let wght = font.variations().iter().find(|v| &v.tag == b"wght");
+            assert_eq!(wght.map(|v| v.value), Some(expected), "{weight:?}");
+            let shaped = system
+                .raster_font_system()
+                .get_font(glyph.font_id, glyph.font_weight)
+                .and_then(|font| font.wght());
+            assert_eq!(shaped, Some(expected), "{weight:?}");
         }
     }
 

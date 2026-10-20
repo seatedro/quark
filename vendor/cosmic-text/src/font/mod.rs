@@ -14,7 +14,7 @@ use core::fmt;
 
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use self_cell::self_cell;
 
@@ -54,6 +54,7 @@ pub struct Font {
     data: FontData,
     id: fontdb::ID,
     monospace_fallback: Option<FontMonospaceFallback>,
+    wght: Option<f32>,
 }
 
 impl fmt::Debug for Font {
@@ -67,6 +68,11 @@ impl fmt::Debug for Font {
 impl Font {
     pub const fn id(&self) -> fontdb::ID {
         self.id
+    }
+
+    /// The `wght` coordinate the font was built at, if it has the axis.
+    pub fn wght(&self) -> Option<f32> {
+        self.wght
     }
 
     pub fn monospace_em_width(&self) -> Option<f32> {
@@ -137,9 +143,10 @@ impl Font {
         // `ShaperData`, and once to create the persistent `FontRef` tied to the
         // lifetime of the face data.
         let font_ref = FontRef::from_index((*data).as_ref(), info.index).ok()?;
+        let wght = wght_coordinate(&font_ref, weight);
         let location = font_ref
             .axes()
-            .location([(Tag::new(b"wght"), weight.0 as f32)]);
+            .location(wght.map(|value| (Tag::new(b"wght"), value)));
         let metrics = font_ref.metrics(Size::unscaled(), &location);
 
         let monospace_fallback = if cfg!(feature = "monospace_fallback") {
@@ -206,6 +213,7 @@ impl Font {
         Some(Self {
             id: info.id,
             monospace_fallback,
+            wght,
             #[cfg(feature = "swash")]
             swash: {
                 let swash = swash::FontRef::from_index((*data).as_ref(), info.index as usize)?;
@@ -236,6 +244,87 @@ impl Font {
             data: FontData::new(Blob::new(data), info.index),
         })
     }
+}
+
+/// The `wght` coordinate that draws CSS `weight` in `font`, or `None` if
+/// it has no `wght` axis. Most axes use the CSS scale, so the weight is
+/// clamped to the axis. An axis on another scale (Berkeley Mono's 100 to
+/// 150, which leaves its OS/2 weight class outside the axis) is mapped
+/// through its named instances and its default at the weight class.
+pub fn wght_coordinate(font: &FontRef<'_>, weight: fontdb::Weight) -> Option<f32> {
+    let axes = font.axes();
+    let axis = axes.iter().find(|axis| axis.tag() == Tag::new(b"wght"))?;
+    let (min, max) = (axis.min_value(), axis.max_value());
+    let requested = f32::from(weight.0);
+    let class = font
+        .os2()
+        .map_or(0.0, |os2| f32::from(os2.us_weight_class()));
+    if !(1.0..=1000.0).contains(&class) || (min..=max).contains(&class) {
+        return Some(requested.clamp(min, max));
+    }
+
+    // (CSS weight, axis value) pairs, sorted by weight.
+    let mut anchors: Vec<(f32, f32)> = Vec::from([(class, axis.default_value())]);
+    for instance in font.named_instances().iter() {
+        let name: String = font
+            .localized_strings(instance.subfamily_name_id())
+            .english_or_first()
+            .map(|name| {
+                name.chars()
+                    .filter(char::is_ascii_alphanumeric)
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let name = name.trim_end_matches("italic").trim_end_matches("oblique");
+        if let (Some(css), Some(value)) =
+            (css_weight(name), instance.user_coords().nth(axis.index()))
+        {
+            anchors.push((css, value));
+        }
+    }
+    anchors.sort_by(|a, b| a.0.total_cmp(&b.0));
+    anchors.dedup_by_key(|anchor| anchor.0);
+    // Drop instances that would make heavier weights draw lighter.
+    let mut last = f32::NEG_INFINITY;
+    anchors.retain(|&(_, value)| {
+        let keep = value >= last;
+        if keep {
+            last = value;
+        }
+        keep
+    });
+    if anchors[0].0 > 1.0 {
+        anchors.insert(0, (1.0, min));
+    }
+    if anchors[anchors.len() - 1].0 < 1000.0 {
+        anchors.push((1000.0, max));
+    }
+
+    let value = anchors
+        .windows(2)
+        .find(|pair| requested <= pair[1].0)
+        .map_or(anchors[anchors.len() - 1].1, |pair| {
+            let ((w0, v0), (w1, v1)) = (pair[0], pair[1]);
+            v0 + (v1 - v0) * ((requested - w0) / (w1 - w0)).clamp(0.0, 1.0)
+        });
+    Some(value.clamp(min, max))
+}
+
+/// The CSS weight of a standard weight name, lowercase without spaces.
+fn css_weight(name: &str) -> Option<f32> {
+    Some(match name {
+        "thin" | "hairline" => 100.0,
+        "extralight" | "ultralight" => 200.0,
+        "light" => 300.0,
+        "" | "regular" | "normal" | "book" => 400.0,
+        "medium" => 500.0,
+        "semibold" | "demibold" => 600.0,
+        "bold" => 700.0,
+        "extrabold" | "ultrabold" => 800.0,
+        "black" | "heavy" => 900.0,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

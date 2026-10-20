@@ -318,7 +318,7 @@ impl FontTable {
         };
         let post_script = face.post_script_name.clone();
         // The coordinates swash rasterizes with: `wght` from the cache key
-        // clamped to the axis, every other axis at its default.
+        // mapped onto the axis, every other axis at its default.
         let font = system.get_font(id, weight).expect("font");
         let axes: Vec<String> = font
             .as_swash()
@@ -326,10 +326,9 @@ impl FontTable {
             .map(|axis| {
                 let tag = axis.tag().to_be_bytes();
                 let tag = String::from_utf8_lossy(&tag).into_owned();
-                let value = if tag == "wght" {
-                    f32::from(weight.0).clamp(axis.min_value(), axis.max_value())
-                } else {
-                    axis.default_value()
+                let value = match font.wght() {
+                    Some(value) if tag == "wght" => value,
+                    _ => axis.default_value(),
                 };
                 format!(
                     "{{\"tag\": {tag:?}, \"min\": {}, \"default\": {}, \"max\": {}, \"value\": {value}}}",
