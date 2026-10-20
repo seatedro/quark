@@ -24,11 +24,6 @@ fn swash_image(
         return None;
     };
 
-    let variable_width = font
-        .as_swash()
-        .variations()
-        .find_by_tag(swash::Tag::from_be_bytes(*b"wght"));
-
     // Build the scaler. The context keeps the last font's variation
     // coordinates and `variations` only overwrites the axes it names, so
     // clear them first: otherwise an axis this font has but the settings
@@ -38,11 +33,10 @@ fn swash_image(
         .normalized_coords(core::iter::empty::<i16>())
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
-    if let Some(variation) = variable_width {
+    if let Some(value) = font.wght() {
         scaler = scaler.variations(std::iter::once(swash::Setting {
             tag: swash::Tag::from_be_bytes(*b"wght"),
-            value: f32::from(cache_key.font_weight.0)
-                .clamp(variation.min_value(), variation.max_value()),
+            value,
         }));
     }
     let mut scaler = scaler.build();
