@@ -82,8 +82,6 @@ tokens! {
         /// checkbox's check, a switch's thumb, a filled button's label.
         on_accent,
         selection_bg,
-        /// Text drawn over `selection_bg`, at least 4.5:1 against it. A theme
-        /// file that leaves it out gets its `text`.
         selection_fg,
         background,
         surface,
