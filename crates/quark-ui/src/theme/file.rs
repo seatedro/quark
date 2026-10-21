@@ -375,6 +375,13 @@ fn parse_variant(
             ),
         }
     }
+    let names_selection_fg = variant
+        .get("colors")
+        .and_then(Value::as_object)
+        .is_some_and(|colors| colors.contains_key("selection_fg"));
+    if !names_selection_fg {
+        theme.colors.selection_fg = theme.colors.text;
+    }
     theme
 }
 
@@ -538,6 +545,8 @@ mod tests {
         let mut expected = Theme::default_dark();
         expected.colors.accent = Color::rgba(0x59, 0xc2, 0xff, 255);
         expected.colors.text = Color::rgba(255, 255, 255, 0x88);
+        // Left out, `selection_fg` follows `text`.
+        expected.colors.selection_fg = expected.colors.text;
         // A family without a light variant uses its dark one in light mode.
         assert_eq!(family.theme(ThemeMode::Light), expected);
     }

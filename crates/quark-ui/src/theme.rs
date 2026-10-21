@@ -82,6 +82,9 @@ tokens! {
         /// checkbox's check, a switch's thumb, a filled button's label.
         on_accent,
         selection_bg,
+        /// Text drawn over `selection_bg`, at least 4.5:1 against it. A theme
+        /// file that leaves it out gets its `text`.
+        selection_fg,
         background,
         surface,
         editor_surface,
@@ -633,6 +636,7 @@ fn dark_colors(
         accent_strong: b[TextSubtle],
         on_accent: Color::rgba(255, 255, 255, 255),
         selection_bg: b[ElementActive],
+        selection_fg: n[Text],
 
         // Overlay
         overlay_scrim: Color::rgba(0, 0, 0, 180),
@@ -742,6 +746,7 @@ fn light_colors(
         accent_strong: b[TextSubtle],
         on_accent: Color::rgba(255, 255, 255, 255),
         selection_bg: b[ElementHover],
+        selection_fg: n[TextStrong],
 
         // Overlay
         overlay_scrim: Color::rgba(11, 21, 32, 51),
@@ -840,6 +845,7 @@ fn high_contrast_dark_colors() -> ThemeColors {
         accent_strong: rgb(0xc4e2ff),
         on_accent: rgb(0x000000),
         selection_bg: rgb(0x14375e),
+        selection_fg: rgb(0xffffff),
         background: rgb(0x000000),
         surface: rgb(0x0a0a0a),
         editor_surface: rgb(0x000000),
@@ -913,6 +919,7 @@ fn high_contrast_light_colors() -> ThemeColors {
         accent_strong: rgb(0x002152),
         on_accent: rgb(0xffffff),
         selection_bg: rgb(0xbfd9ff),
+        selection_fg: rgb(0x000000),
         background: rgb(0xffffff),
         surface: rgb(0xfafafa),
         editor_surface: rgb(0xffffff),
@@ -1208,6 +1215,7 @@ mod tests {
             (CODE, CODE_BACKGROUNDS, 7.0),
             (GUTTER, GUTTER_BACKGROUNDS, 7.0),
             (&["on_accent"], &["accent", "accent_strong"], 7.0),
+            (&["selection_fg"], &["selection_bg"], 7.0),
             (&["placeholder", "text_disabled"], CONTROL_BACKGROUNDS, 4.5),
             (BOUNDARIES, CONTROL_BACKGROUNDS, 3.0),
         ];
@@ -1243,6 +1251,20 @@ mod tests {
                 }
             }
             assert!(failures.is_empty(), "{:?}: {failures:#?}", theme.mode);
+        }
+    }
+
+    #[test]
+    fn builtin_selection_text_reads_on_the_selection() {
+        for theme in [
+            Theme::default_dark(),
+            Theme::default_light(),
+            Theme::high_contrast_dark(),
+            Theme::high_contrast_light(),
+        ] {
+            let c = &theme.colors;
+            let ratio = contrast_ratio(c.selection_fg, c.selection_bg);
+            assert!(ratio >= 4.5, "{:?}: {ratio:.2}", theme.mode);
         }
     }
 
