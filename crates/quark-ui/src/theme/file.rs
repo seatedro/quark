@@ -338,6 +338,9 @@ fn parse_variant(
                         Err(message) => issue(issues, at, message),
                     }
                 }
+                if !colors.contains_key("selection_fg") {
+                    theme.colors.selection_fg = theme.colors.text;
+                }
             }
             ("metrics", Value::Object(metrics)) => {
                 for (token, value) in metrics {
@@ -374,13 +377,6 @@ fn parse_variant(
                 &["colors", "metrics", "reduced_motion", "contrast", "palette"],
             ),
         }
-    }
-    let names_selection_fg = variant
-        .get("colors")
-        .and_then(Value::as_object)
-        .is_some_and(|colors| colors.contains_key("selection_fg"));
-    if !names_selection_fg {
-        theme.colors.selection_fg = theme.colors.text;
     }
     theme
 }

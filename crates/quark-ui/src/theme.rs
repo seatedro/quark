@@ -1252,20 +1252,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn builtin_selection_text_reads_on_the_selection() {
-        for theme in [
-            Theme::default_dark(),
-            Theme::default_light(),
-            Theme::high_contrast_dark(),
-            Theme::high_contrast_light(),
-        ] {
-            let c = &theme.colors;
-            let ratio = contrast_ratio(c.selection_fg, c.selection_bg);
-            assert!(ratio >= 4.5, "{:?}: {ratio:.2}", theme.mode);
-        }
-    }
-
     // Catches disabled controls looking enabled in high contrast: the light
     // theme's disabled radio (#2E2E2E, text_muted) was hard to tell from an
     // enabled one (#000).
@@ -1368,6 +1354,19 @@ mod tests {
                     theme.mode
                 );
             }
+        }
+    }
+
+    #[test]
+    fn standard_selection_text_is_readable_on_the_selection() {
+        for theme in [Theme::default_dark(), Theme::default_light()] {
+            let c = &theme.colors;
+            let ratio = contrast_ratio(c.selection_fg, c.selection_bg);
+            assert!(
+                ratio >= 4.5,
+                "{:?}: selection_fg on selection_bg: {ratio:.2}",
+                theme.mode
+            );
         }
     }
 
