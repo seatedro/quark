@@ -759,6 +759,12 @@ enum Redraw {
 /// Ask for a frame of `window`, or of the context's window without one.
 /// Explicit, since the context may be bound to another window than the
 /// one whose state changed.
+fn types_text(binding: &Binding) -> bool {
+    let m = binding.mods;
+    !(m.cmd || m.ctrl || m.alt || m.primary)
+        && (binding.key == "space" || binding.key.chars().count() == 1)
+}
+
 fn redraw(reason: Redraw, window: Option<WindowHandle>, cx: &mut EventContext) {
     tracing::trace!(?reason, ?window, "redraw");
     match window {
@@ -1198,6 +1204,9 @@ impl<U: UiApp> UiAdapter<U> {
             };
             if let Some(command) = command {
                 self.edit(target, command, cx);
+                return;
+            }
+            if types_text(&binding) {
                 return;
             }
         }
