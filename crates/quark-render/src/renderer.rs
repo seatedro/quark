@@ -2431,7 +2431,8 @@ impl Renderer {
         // narrow column, a 2x asset on a 1x screen) sample a mip level
         // instead of skipping texels and aliasing. One drawn 1:1 samples
         // level 0 exactly.
-        let (mip_level_count, data) = mip_chain(&image.rgba, image.width, image.height);
+        let pixels = premultiply(&image.rgba);
+        let (mip_level_count, data) = mip_chain(&pixels, image.width, image.height);
         let texture = self.device.create_texture_with_data(
             &self.queue,
             &wgpu::TextureDescriptor {
@@ -2502,6 +2503,25 @@ fn linear_to_srgb_byte(l: f32) -> u8 {
 /// level's sRGB RGBA8 pixels, level 0 (`rgba` itself) first. Each level
 /// halves the last (rounding down, at least 1) and averages 2x2 blocks in
 /// linear light; alpha averages linearly.
+/// Image pixels arrive as straight-alpha sRGB, but every pipeline blends
+/// premultiplied. Scale color by alpha in linear light, so the sRGB texture
+/// decodes to premultiplied linear values; opaque images pass through.
+fn premultiply(rgba: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if rgba.chunks_exact(4).all(|px| px[3] == u8::MAX) {
+        return std::borrow::Cow::Borrowed(rgba);
+    }
+    let lut = srgb_to_linear_table();
+    let mut out = Vec::with_capacity(rgba.len());
+    for px in rgba.chunks_exact(4) {
+        let alpha = f32::from(px[3]) / 255.0;
+        for &c in &px[..3] {
+            out.push(linear_to_srgb_byte(lut[c as usize] * alpha));
+        }
+        out.push(px[3]);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 fn mip_chain(rgba: &[u8], width: u32, height: u32) -> (u32, std::borrow::Cow<'_, [u8]>) {
     let levels = 32 - width.max(height).max(1).leading_zeros();
     if levels == 1 {
@@ -5093,6 +5113,23 @@ mod tests {
     use crate::scene::ShapedText;
     use crate::text::test_text;
     use quark_text::{TextParams, TextStyle};
+
+    // Regression: straight-alpha image pixels were blended as premultiplied,
+    // so soft edges of transparent images drew a bright fringe.
+    #[test]
+    fn images_upload_premultiplied_and_opaque_ones_unchanged() {
+        let opaque = [10, 20, 30, 255, 200, 100, 50, 255];
+        assert!(matches!(
+            premultiply(&opaque),
+            std::borrow::Cow::Borrowed(_)
+        ));
+
+        let soft = premultiply(&[255, 255, 255, 128, 255, 0, 0, 0]);
+        assert_eq!(soft[3], 128);
+        assert_eq!(&soft[4..], &[0, 0, 0, 0]);
+        let half = linear_to_srgb_byte(128.0 / 255.0);
+        assert_eq!(&soft[..3], &[half, half, half]);
+    }
 
     // A transparent window must take the alpha mode matching premultiplied
     // output when offered, and report an opaque fallback when only opaque
