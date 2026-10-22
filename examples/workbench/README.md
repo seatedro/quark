@@ -34,6 +34,10 @@ cargo run -p quark-workbench --bin workbench --features devtools -- --scenario r
 Flags win over the environment. The environment forms exist because the
 e2e runner starts binaries without arguments.
 
+`mod+shift+j` ("Jump to element") labels every button, row, tab, and
+field on screen with home row keys; type a label to click it, or hold
+Shift to only focus it.
+
 ### Code highlighting
 
 Code blocks and tool output render plain. Quark ships no highlighting

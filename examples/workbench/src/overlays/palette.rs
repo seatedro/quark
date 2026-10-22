@@ -98,6 +98,7 @@ fn command_icon(id: CommandId) -> &'static str {
         CommandId::ToggleTerminal => lucide::TERMINAL,
         CommandId::FindInDocument => lucide::SEARCH,
         CommandId::FocusComposer => lucide::PENCIL,
+        CommandId::JumpToElement => lucide::KEY,
         CommandId::SendPrompt => lucide::ARROW_UP,
         CommandId::StopRun => lucide::X,
         CommandId::ShowFiles => lucide::FOLDER,

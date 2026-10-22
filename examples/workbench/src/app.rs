@@ -328,6 +328,12 @@ impl Workbench {
     /// Offer `id` to the surfaces that own commands, then handle the
     /// app-level rest.
     fn run_command(&mut self, id: CommandId, cx: &mut UiContext) {
+        // Ahead of the modal owners: jump mode labels only an open modal's
+        // elements by itself.
+        if id == CommandId::JumpToElement {
+            cx.start_jump_hints();
+            return;
+        }
         let handled = {
             let scx = surface_cx!(self, cx.theme(), cx);
             let fx = &mut self.fx;

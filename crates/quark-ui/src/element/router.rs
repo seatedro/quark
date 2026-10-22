@@ -452,7 +452,7 @@ impl InputHandlers {
         self.key_action.extend_from_slice(&from.key_action);
     }
 
-    fn click(&self, node: usize) -> Option<&ClickHandler> {
+    pub(super) fn click(&self, node: usize) -> Option<&ClickHandler> {
         let i = self.click_node.iter().position(|n| *n == node)?;
         self.click.get(i)
     }
@@ -1087,13 +1087,19 @@ impl InputRouter {
         {
             return Delivery::default();
         }
-        let semantic = &self.frame.semantic;
-        let Some(node) = focus.and_then(|focus| semantic.node_for_focus(focus)) else {
-            return Delivery::default();
-        };
-        let (Some(handler), Some(target)) =
-            (self.frame.handlers.click(node), semantic.nodes().get(node))
-        else {
+        match focus.and_then(|focus| self.frame.semantic.node_for_focus(focus)) {
+            Some(node) => self.click_node(node),
+            None => Delivery::default(),
+        }
+    }
+
+    /// Click `node` at its center, as Enter on it when focused does.
+    /// Nothing for a disabled node or one without a click handler.
+    pub fn click_node(&self, node: usize) -> Delivery {
+        let (Some(handler), Some(target)) = (
+            self.frame.handlers.click(node),
+            self.frame.semantic.nodes().get(node),
+        ) else {
             return Delivery::default();
         };
         if target.state.disabled {

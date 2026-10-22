@@ -51,8 +51,8 @@ use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, DragEnd, DragLocation, DragOutcome, DragSession,
     DropPolicy, DropTargets, ElementContext, ElementHandle, ElementHandles, HandoffError,
-    ImeTarget, LayoutSnapshot, Mods, TextHitContent, TextInputHitArea, TooltipRegion, WheelEvent,
-    render_element,
+    ImeTarget, JumpChoice, JumpKey, LayoutSnapshot, Mods, TextHitContent, TextInputHitArea,
+    TooltipRegion, WheelEvent, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -528,6 +528,29 @@ impl UiContext<'_, '_> {
         }
     }
 
+    /// Start jump mode in this window: every enabled element on screen
+    /// that clicks or takes text gets a short home row label, drawn above
+    /// everything (see [`quark_ui::element::JumpHints`]). Typing a label
+    /// focuses its element and clicks it, as a click from assistive tech
+    /// does; with Shift held it only takes focus, as a text field always
+    /// does. Backspace takes a key back; Escape, any other key, a press,
+    /// or wheel motion ends the mode. Labels the last painted frame, so
+    /// start it from input such as a key binding. Returns how many
+    /// elements got a label; with none, the mode does not start.
+    pub fn start_jump_hints(&mut self) -> usize {
+        let win = &mut *self.windows.current;
+        let count = win.jump.start(win.router.frame());
+        if count > 0 {
+            redraw(Redraw::Jump, self.windows.handle, self.window);
+        }
+        count
+    }
+
+    /// Whether jump mode ([`Self::start_jump_hints`]) is on in this window.
+    pub fn jump_hints_active(&self) -> bool {
+        self.windows.current.jump.is_active()
+    }
+
     /// `window`'s state, made now for a window open or opening that has
     /// had no callback yet.
     fn state_in(&mut self, window: WindowHandle) -> Option<&mut WindowUiState> {
@@ -754,6 +777,8 @@ enum Redraw {
     Theme,
     /// The accessibility tree has something new to publish.
     Announce,
+    /// Jump mode started, ended, or narrowed its labels.
+    Jump,
 }
 
 /// Ask for a frame of `window`, or of the context's window without one.
@@ -1823,6 +1848,8 @@ impl<U: UiApp> App for UiAdapter<U> {
             .or_else(|| session.and_then(|session| session.preview_in(drag_window_id(window))));
         win.drag_preview
             .paint(preview, &mut painted.scene, &mut ecx);
+        win.jump.refresh(&painted.input);
+        win.jump.paint(&mut painted.scene, &mut ecx);
         win.spare_tooltip_regions = std::mem::take(&mut ecx.tooltip_regions);
         #[cfg(feature = "devtools")]
         let phases = win.devtools.end_frame(&mut ecx.devtools);
@@ -2063,6 +2090,9 @@ impl<U: UiApp> UiAdapter<U> {
         {
             return;
         }
+        if self.jump_input(input.as_ref(), cx) {
+            return;
+        }
         let handled = self.with_app(cx, |app, ucx| app.event(event, ucx));
         self.end_taken_pointer(cx);
         if handled {
@@ -2072,6 +2102,55 @@ impl<U: UiApp> UiAdapter<U> {
             let mods = crate::input::mods_of(cx.modifiers());
             self.win.router.set_modifiers(mods);
             self.input(input, cx);
+        }
+    }
+
+    /// Jump mode's share of `input`: while it is on, keys and text go to
+    /// it, and a press, wheel motion, or the window losing focus ends it
+    /// before going on as usual. True when the input stops here.
+    fn jump_input(&mut self, input: Option<&UiInput>, cx: &mut EventContext) -> bool {
+        let win = &mut *self.win;
+        let took_key = std::mem::take(&mut win.jump_took_key);
+        match input {
+            Some(UiInput::Key(binding)) => {
+                if !win.jump.is_active() {
+                    return false;
+                }
+                win.jump_took_key = true;
+                let outcome = win.jump.key(binding);
+                redraw(Redraw::Jump, self.win_handle, cx);
+                if let JumpKey::Chosen(choice) = outcome {
+                    self.jump_to(choice, cx);
+                }
+                true
+            }
+            Some(UiInput::Text(_) | UiInput::ImeCommit(_) | UiInput::Preedit { .. }) => {
+                win.jump.is_active() || took_key
+            }
+            Some(UiInput::PointerDown(_) | UiInput::Wheel { .. } | UiInput::WindowFocus(false)) => {
+                if win.jump.is_active() {
+                    win.jump.cancel();
+                    redraw(Redraw::Jump, self.win_handle, cx);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Focus the element a completed jump label names, then click it, as a
+    /// click from assistive tech does.
+    fn jump_to(&mut self, choice: JumpChoice, cx: &mut EventContext) {
+        self.show_focus(cx);
+        if let Some(focus) = choice.focus
+            && self.win.focus != Some(focus)
+        {
+            self.win.focus = Some(focus);
+            redraw(Redraw::Focus, self.win_handle, cx);
+        }
+        if choice.click {
+            let delivery = self.win.router.click_node(choice.node);
+            self.deliver(delivery, cx);
         }
     }
 
