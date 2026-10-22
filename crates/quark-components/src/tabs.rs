@@ -100,6 +100,7 @@ pub struct TabBar {
     items: Vec<TabItem>,
     fill: bool,
     full_width: bool,
+    full_height: bool,
     label: Option<String>,
 }
 
@@ -108,6 +109,7 @@ pub fn tab_bar(items: Vec<TabItem>) -> TabBar {
         items,
         fill: false,
         full_width: false,
+        full_height: false,
         label: None,
     }
 }
@@ -126,6 +128,11 @@ impl TabBar {
         self
     }
 
+    pub fn full_height(mut self) -> Self {
+        self.full_height = true;
+        self
+    }
+
     /// The tab list's accessible name, which tells it apart from other tab
     /// lists around it (a dock's, say).
     pub fn label(mut self, label: impl Into<String>) -> Self {
@@ -138,6 +145,7 @@ impl RenderOnce for TabBar {
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let fill = self.fill;
+        let tall = self.full_height;
 
         view! {
             <div
@@ -149,9 +157,10 @@ impl RenderOnce for TabBar {
                 accessibility_id={"tab-bar"}
                 @when {let Some(label) = self.label} { aria-label={label} }
                 @when {self.full_width} { w_full }
+                @when {tall} { h_full }
             >
                 for item in self.items {
-                    {Self::tab(item, fill, cx)}
+                    {Self::tab(item, fill, tall, cx)}
                 }
             </div>
         }
@@ -159,7 +168,7 @@ impl RenderOnce for TabBar {
 }
 
 impl TabBar {
-    fn tab(item: TabItem, fill: bool, cx: &ElementContext) -> AnyElement {
+    fn tab(item: TabItem, fill: bool, tall: bool, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let m = &cx.theme.metrics;
         let icon_size = m.ui_small_font_size;
@@ -192,12 +201,17 @@ impl TabBar {
                 }
                 @when {!item.active} { hover_bg={tc.ghost_element_hover} }
                 @when {fill} { flex_1 }
+                @when {tall} { h_full }
             >
+                if tall {
+                    <div h={Sz::TAB_INDICATOR_H} />
+                }
                 <div
                     class="flex-row items-center"
                     gap={m.spacing_xs}
                     px={m.spacing_md}
                     py={m.spacing_sm}
+                    @when {tall} { flex_1 }
                 >
                     if let Some(svg) = item.icon {
                         <icon
