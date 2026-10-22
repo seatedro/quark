@@ -262,29 +262,36 @@ impl FuzzyMatcher {
 /// How a binding reads in a hint: `Ctrl+Shift+P`, or `Cmd+Shift+P` on
 /// macOS for `mod+shift+p`.
 pub fn binding_label(binding: &Binding) -> String {
-    binding_keys(binding).join("+")
+    let separator = if cfg!(target_os = "macos") { "" } else { "+" };
+    binding_keys(binding).join(separator)
 }
 
 /// The keys of a binding as [`binding_label`] names them, one per keycap:
-/// `["Ctrl", "Shift", "P"]`.
+/// `["Ctrl", "Shift", "P"]`, or `["⇧", "⌘", "P"]` on macOS.
 pub fn binding_keys(binding: &Binding) -> Vec<String> {
     let m = binding.mods;
     let mac = cfg!(target_os = "macos");
     let mut out = Vec::new();
     let mut push = |part: &str| out.push(part.to_owned());
     if m.ctrl || (m.primary && !mac) {
-        push("Ctrl");
+        push(if mac { "\u{2303}" } else { "Ctrl" });
     }
     if m.alt {
-        push(if mac { "Option" } else { "Alt" });
+        push(if mac { "\u{2325}" } else { "Alt" });
     }
     if m.shift {
-        push("Shift");
+        push(if mac { "\u{21E7}" } else { "Shift" });
     }
     if m.cmd || (m.primary && mac) {
-        push("Cmd");
+        push(if mac { "\u{2318}" } else { "Cmd" });
     }
     let key = match binding.key.as_str() {
+        "enter" if mac => "\u{21A9}".to_owned(),
+        "tab" if mac => "\u{21E5}".to_owned(),
+        "arrowup" if mac => "\u{2191}".to_owned(),
+        "arrowdown" if mac => "\u{2193}".to_owned(),
+        "arrowleft" if mac => "\u{2190}".to_owned(),
+        "arrowright" if mac => "\u{2192}".to_owned(),
         "escape" => "Esc".to_owned(),
         "arrowup" => "Up".to_owned(),
         "arrowdown" => "Down".to_owned(),

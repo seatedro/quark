@@ -233,6 +233,9 @@ pub fn format_binding(binding: &str) -> String {
     let Some(key) = parts.pop() else {
         return binding.to_owned();
     };
+    if cfg!(target_os = "macos") {
+        return mac_binding(&parts, key);
+    }
     let modifiers = parts
         .into_iter()
         .map(|part| match part {
@@ -254,6 +257,39 @@ pub fn format_binding(binding: &str) -> String {
     } else {
         let key = display_key(key);
         [modifiers, vec![key]].concat().join("+")
+    }
+}
+
+/// macOS names modifiers with symbols in the menu bar's order,
+/// Control Option Shift Command, with nothing between them: `⌃⇧⌘P`.
+fn mac_binding(modifiers: &[&str], key: &str) -> String {
+    let has = |names: &[&str]| modifiers.iter().any(|part| names.contains(part));
+    let mut out = String::new();
+    for (names, symbol) in [
+        (&["ctrl"][..], '\u{2303}'),
+        (&["alt"][..], '\u{2325}'),
+        (&["shift"][..], '\u{21E7}'),
+        (&["cmd", "mod"][..], '\u{2318}'),
+    ] {
+        if has(names) {
+            out.push(symbol);
+        }
+    }
+    out.push_str(&mac_key(key));
+    out
+}
+
+pub(crate) fn mac_key(key: &str) -> String {
+    match key {
+        "enter" => "\u{21A9}".to_owned(),
+        "tab" => "\u{21E5}".to_owned(),
+        "backspace" => "\u{232B}".to_owned(),
+        "delete" => "\u{2326}".to_owned(),
+        "arrowup" => "\u{2191}".to_owned(),
+        "arrowdown" => "\u{2193}".to_owned(),
+        "arrowleft" => "\u{2190}".to_owned(),
+        "arrowright" => "\u{2192}".to_owned(),
+        key => display_key(key),
     }
 }
 
@@ -402,7 +438,19 @@ mod tests {
     #[test]
     fn format_binding_uses_display_names() {
         assert_eq!(format_binding("shift+/"), "?");
-        assert_eq!(format_binding("ctrl+shift+arrowup"), "Ctrl+Shift+Up");
         assert_eq!(format_binding("g g"), "G then G");
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                format_binding("ctrl+shift+arrowup"),
+                "\u{2303}\u{21E7}\u{2191}"
+            );
+            assert_eq!(
+                format_binding("mod+shift+enter"),
+                "\u{21E7}\u{2318}\u{21A9}"
+            );
+            assert_eq!(format_binding("alt+h"), "\u{2325}H");
+        } else {
+            assert_eq!(format_binding("ctrl+shift+arrowup"), "Ctrl+Shift+Up");
+        }
     }
 }
