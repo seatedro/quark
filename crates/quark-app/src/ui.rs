@@ -761,7 +761,8 @@ enum Redraw {
 /// one whose state changed.
 fn types_text(binding: &Binding) -> bool {
     let m = binding.mods;
-    !(m.cmd || m.ctrl || m.alt || m.primary)
+    let composes = cfg!(target_os = "macos") && m.alt;
+    !(m.cmd || m.ctrl || m.primary || (m.alt && !composes))
         && (binding.key == "space" || binding.key.chars().count() == 1)
 }
 
@@ -2249,6 +2250,14 @@ mod tests {
         );
         adapter.win.focus = Some(FIELD);
         adapter
+    }
+
+    #[test]
+    fn option_letters_type_text_only_on_macos() {
+        let option_h: Binding = "alt+h".parse().unwrap();
+        assert_eq!(super::types_text(&option_h), cfg!(target_os = "macos"));
+        assert!(!super::types_text(&"ctrl+h".parse().unwrap()));
+        assert!(super::types_text(&"h".parse().unwrap()));
     }
 
     // Regression: the IME candidate window was placed during event
