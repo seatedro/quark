@@ -2,9 +2,10 @@
 //!
 //! The app registers [`PaletteProvider`]s; each one defines a section and
 //! fills it with [`PaletteItem`]s (title, icon, keybinding hint, action)
-//! when the palette opens. Quark supplies the modal, focus handoff, the
-//! [`FuzzyMatcher`] with match highlighting, recents, `mod+1`..`mod+9`
-//! quick select, and a virtualized result list.
+//! when the palette opens, and can add rows for the typed query above the
+//! matches ([`PaletteProvider::typed`]). Quark supplies the modal, focus
+//! handoff, the [`FuzzyMatcher`] with match highlighting, recents,
+//! `mod+1`..`mod+9` quick select, and a virtualized result list.
 //!
 //! The palette never sees the app's context. The app wires it up in four
 //! places:
@@ -368,6 +369,12 @@ pub trait PaletteProvider<S: ?Sized> {
     fn title(&self) -> &str;
     /// Append this section's items to `out`.
     fn collect(&self, state: &S, out: &mut Vec<PaletteItem>);
+    /// Append rows for `query` (trimmed, never empty) to `out`. They show
+    /// above every match, unfiltered, the first one selected, and never
+    /// join recents. Runs on every query change.
+    fn typed(&self, query: &str, out: &mut Vec<PaletteItem>) {
+        let _ = (query, out);
+    }
 }
 
 /// What an element of the palette asks for. The app wraps it in its own
@@ -401,6 +408,9 @@ pub enum PaletteOutcome {
 struct Section {
     title: String,
     items: std::ops::Range<usize>,
+    /// Rows [`PaletteProvider::typed`] added for the current query, after
+    /// every collected item.
+    typed: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -543,32 +553,41 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         for provider in &self.providers {
             let start = self.items.len();
             provider.collect(state, &mut self.items);
+            let end = self.items.len();
             self.sections.push(Section {
                 title: provider.title().to_owned(),
-                items: start..self.items.len(),
+                items: start..end,
+                typed: end..end,
             });
         }
         self.hints.clear();
+        self.hint_keys.clear();
+        self.extend_hints(0);
+        self.refilter();
+    }
+
+    /// Hints for the items from `from` on.
+    fn extend_hints(&mut self, from: usize) {
+        let items = &self.items[from..];
         self.hints.extend(
-            self.items
+            items
                 .iter()
                 .map(|item| item.binding.as_ref().map(binding_label)),
         );
-        self.hint_keys.clear();
         if self.keycaps {
             self.hint_keys.extend(
-                self.items
+                items
                     .iter()
                     .map(|item| item.binding.as_ref().map(binding_keys).unwrap_or_default()),
             );
         }
-        self.refilter();
     }
 
     /// Close without choosing. Returns the focus to restore.
     pub fn close(&mut self) -> Option<FocusId> {
         self.open = false;
         self.items.clear();
+        self.sections.clear();
         self.rows.clear();
         self.matches.clear();
         self.restore_focus.take()
@@ -608,6 +627,8 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
         self.matches.clear();
         self.positions.clear();
         self.rows.clear();
+        self.collect_typed();
+        self.list_typed();
         self.matcher.set_query(self.query.text());
         if self.matcher.is_empty() {
             self.list_unfiltered();
@@ -620,6 +641,46 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
             .position(|row| matches!(row, Row::Item(_)))
             .unwrap_or(0);
         self.scroll_top = 0;
+    }
+
+    /// How many items the providers collected; typed rows follow them.
+    fn collected(&self) -> usize {
+        self.sections.last().map_or(0, |s| s.items.end)
+    }
+
+    /// Replace the typed rows with the providers' rows for the query.
+    fn collect_typed(&mut self) {
+        let collected = self.collected();
+        self.items.truncate(collected);
+        self.hints.truncate(collected);
+        self.hint_keys.truncate(collected);
+        let query = self.query.text().trim();
+        for (provider, section) in self.providers.iter().zip(&mut self.sections) {
+            let start = self.items.len();
+            if !query.is_empty() {
+                provider.typed(query, &mut self.items);
+            }
+            section.typed = start..self.items.len();
+        }
+        self.extend_hints(collected);
+    }
+
+    /// Typed rows first, each under its section's heading.
+    fn list_typed(&mut self) {
+        for (section_index, section) in self.sections.iter().enumerate() {
+            if section.typed.is_empty() {
+                continue;
+            }
+            self.rows.push(Row::Header(Some(section_index as u32)));
+            for item in section.typed.clone() {
+                self.rows.push(Row::Item(self.matches.len() as u32));
+                self.matches.push(Match {
+                    item: item as u32,
+                    score: 0,
+                    highlights: (0, 0),
+                });
+            }
+        }
     }
 
     /// Empty query: recents first, then every section in order.
@@ -662,6 +723,11 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
 
     /// A query: each section's matches, best first.
     fn list_matches(&mut self) {
+        // The last typed section's heading, which its matches can share.
+        let mut heading = self.rows.iter().rev().find_map(|row| match row {
+            Row::Header(section) => *section,
+            Row::Item(_) => None,
+        });
         for section_index in 0..self.sections.len() {
             let start = self.matches.len();
             for item in self.sections[section_index].items.clone() {
@@ -694,16 +760,19 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
                     .then_with(|| a.item.cmp(&b.item))
             });
             if self.matches.len() > start {
-                self.rows.push(Row::Header(Some(section_index as u32)));
+                if heading.take() != Some(section_index as u32) {
+                    self.rows.push(Row::Header(Some(section_index as u32)));
+                }
                 self.rows
                     .extend((start..self.matches.len()).map(|m| Row::Item(m as u32)));
             }
         }
     }
 
-    fn item_at_row(&self, row: usize) -> Option<&PaletteItem> {
+    /// The index into `items` of the item at `row`.
+    fn item_at_row(&self, row: usize) -> Option<usize> {
         match self.rows.get(row)? {
-            Row::Item(m) => Some(&self.items[self.matches[*m as usize].item as usize]),
+            Row::Item(m) => Some(self.matches[*m as usize].item as usize),
             Row::Header(_) => None,
         }
     }
@@ -761,13 +830,17 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
     }
 
     fn activate_row(&mut self, row: usize) -> PaletteOutcome {
-        let Some(item) = self.item_at_row(row) else {
+        let Some(index) = self.item_at_row(row) else {
             return PaletteOutcome::Handled;
         };
+        let item = &self.items[index];
         let (key, action) = (item.key, item.action.clone());
-        self.recent.retain(|k| *k != key);
-        self.recent.insert(0, key);
-        self.recent.truncate(PALETTE_RECENT_LIMIT);
+        // Typed rows never show among recents, so they do not take a slot.
+        if index < self.collected() {
+            self.recent.retain(|k| *k != key);
+            self.recent.insert(0, key);
+            self.recent.truncate(PALETTE_RECENT_LIMIT);
+        }
         PaletteOutcome::Run {
             action,
             restore_focus: self.close(),
@@ -1219,5 +1292,124 @@ mod tests {
         for (query, candidate, expected) in cases {
             assert_eq!(highlighted(query, candidate), expected, "query {query:?}");
         }
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Pick {
+        Item(u64),
+        Open(String),
+    }
+
+    struct Commands;
+
+    impl PaletteProvider<[&'static str]> for Commands {
+        fn title(&self) -> &str {
+            "Commands"
+        }
+
+        fn collect(&self, titles: &[&'static str], out: &mut Vec<PaletteItem>) {
+            out.extend(
+                titles.iter().zip(0..).map(|(title, key)| {
+                    PaletteItem::new(key, *title, Action::new(Pick::Item(key)))
+                }),
+            );
+        }
+    }
+
+    struct Links;
+
+    impl PaletteProvider<[&'static str]> for Links {
+        fn title(&self) -> &str {
+            "Links"
+        }
+
+        fn collect(&self, _: &[&'static str], _: &mut Vec<PaletteItem>) {}
+
+        fn typed(&self, query: &str, out: &mut Vec<PaletteItem>) {
+            if query.starts_with("http") {
+                let open = Pick::Open(query.to_owned());
+                out.push(PaletteItem::new(
+                    100,
+                    format!("Open {query}"),
+                    Action::new(open),
+                ));
+            }
+        }
+    }
+
+    fn palette() -> CommandPalette<[&'static str]> {
+        let mut palette = CommandPalette::new();
+        palette.register(Commands);
+        palette.register(Links);
+        palette.open(&["HTTP proxy", "Close window"], None);
+        palette
+    }
+
+    /// Shown rows, headings as `# Title`, the selected row marked `>`.
+    fn shown(palette: &CommandPalette<[&'static str]>) -> Vec<String> {
+        (0..palette.rows.len())
+            .map(|row| {
+                match (
+                    palette.rows[row],
+                    palette.item_at_row(row).map(|i| &palette.items[i]),
+                ) {
+                    (Row::Header(section), _) => {
+                        format!(
+                            "# {}",
+                            palette.sections[section.unwrap_or(0) as usize].title
+                        )
+                    }
+                    (_, Some(item)) if row == palette.selected => format!("> {}", item.title),
+                    (_, item) => item.map_or(String::new(), |item| item.title.clone()),
+                }
+            })
+            .collect()
+    }
+
+    // Catches typed rows ranked among matches, filtered by the matcher, or
+    // left behind after the query stops qualifying.
+    #[test]
+    fn typed_rows_lead_the_results_and_follow_the_query() {
+        let mut palette = palette();
+        assert_eq!(
+            shown(&palette),
+            ["# Commands", "> HTTP proxy", "Close window"]
+        );
+
+        palette.edit(TextEditCommand::InsertText(" http".into()), 0);
+        assert_eq!(
+            shown(&palette),
+            ["# Links", "> Open http", "# Commands", "HTTP proxy"]
+        );
+        assert_eq!(palette.positions.len(), 4);
+
+        palette.edit(TextEditCommand::Backspace, 0);
+        assert_eq!(shown(&palette), ["# Commands", "> HTTP proxy"]);
+
+        palette.set_query("https://example.com/a");
+        assert_eq!(shown(&palette), ["# Links", "> Open https://example.com/a"]);
+
+        palette.set_query("");
+        assert_eq!(
+            shown(&palette),
+            ["# Commands", "> HTTP proxy", "Close window"]
+        );
+    }
+
+    // Catches a typed row that Enter skips, runs with another action, or
+    // records in recents.
+    #[test]
+    fn enter_runs_the_typed_row() {
+        let mut palette = palette();
+        palette.set_query("http://a");
+        let enter: Binding = "enter".parse().expect("binding");
+        assert_eq!(
+            palette.handle_key(&enter),
+            Some(PaletteOutcome::Run {
+                action: Action::new(Pick::Open("http://a".into())),
+                restore_focus: None,
+            })
+        );
+        assert!(!palette.recent().contains(&100));
     }
 }
