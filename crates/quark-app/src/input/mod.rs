@@ -81,7 +81,17 @@ pub struct KeyChord {
 
 impl KeyChord {
     pub fn from_key_event(event: &KeyEvent, modifiers: ModifiersState) -> Self {
-        let logical = match &event.logical_key {
+        // macOS Option composes a character (Option+H types "˙"), so bindings
+        // read the key as if Option were up.
+        #[cfg(target_os = "macos")]
+        let key = if modifiers.alt_key() {
+            winit::platform::modifier_supplement::KeyEventExtModifierSupplement::key_without_modifiers(event)
+        } else {
+            event.logical_key.clone()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let key = event.logical_key.clone();
+        let logical = match &key {
             Key::Named(named) => KeyKind::Named(*named),
             Key::Character(text) => KeyKind::Character(text.to_string()),
             // A key winit leaves unnamed that types one control character
