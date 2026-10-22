@@ -2,9 +2,10 @@
 //! the adapter, against elements' own `on_key` handlers.
 
 use quark_ui::FocusId;
-use quark_ui::element::{AnyElement, IntoAnyElement, div};
+use quark_ui::element::{AnyElement, IntoAnyElement, div, text_input};
 use quark_ui::key_context::KeyBindings;
 use quark_ui::style::Styled;
+use quark_ui::text_input::{TextEditCommand, TextEditOutcome, TextField};
 
 use crate::testing::UiTestHarness;
 use crate::ui::{UiAdapter, UiApp, UiContext, ViewContext};
@@ -106,4 +107,63 @@ fn bindings_resolve_by_context_predicate_and_depth() {
         let got = ui.app().log.last().copied().unwrap_or("-");
         assert_eq!(got, expected, "{key} on {focus} in {mode} mode");
     }
+}
+
+const FIELD: FocusId = FocusId::from_key("field");
+
+struct Composer {
+    field: TextField,
+    log: Vec<&'static str>,
+}
+
+impl UiApp for Composer {
+    type Action = Cmd;
+    type Message = ();
+
+    fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+        div()
+            .size_full()
+            .key_context("workspace")
+            .on_key("k", Cmd("element up"))
+            .child(
+                text_input("Comment", "")
+                    .field(&self.field)
+                    .focus_target(FIELD)
+                    .focused(cx.is_focused(FIELD))
+                    .w(200.0)
+                    .h(40.0),
+            )
+            .into_any()
+    }
+
+    fn update(&mut self, Cmd(name): Cmd, _cx: &mut UiContext) {
+        self.log.push(name);
+    }
+
+    fn edit_text(&mut self, _target: FocusId, command: TextEditCommand) -> TextEditOutcome {
+        self.field.apply(command)
+    }
+}
+
+#[test]
+fn printable_keys_type_into_a_focused_field_instead_of_firing_bindings() {
+    let mut keys = KeyBindings::new();
+    for (key, name) in [("space", "page down"), ("j", "down"), ("mod+s", "save")] {
+        keys.bind(key, Some("workspace"), Cmd(name)).unwrap();
+    }
+    let app = Composer {
+        field: TextField::new(""),
+        log: Vec::new(),
+    };
+    let adapter = UiAdapter::new(app, "keys").with_key_bindings(keys);
+    let mut ui = UiTestHarness::with_adapter(adapter, (300.0, 200.0), 1.0);
+    ui.frame();
+    ui.click((10.0, 10.0));
+    assert_eq!(ui.focus(), Some(FIELD));
+
+    ui.type_text("j k");
+    ui.key("mod+s");
+
+    assert_eq!(ui.app().field.text(), "j k");
+    assert_eq!(ui.app().log, ["save"]);
 }
