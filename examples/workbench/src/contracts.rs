@@ -175,6 +175,8 @@ pub enum CommandId {
     ToggleTerminal,
     FindInDocument,
     FocusComposer,
+    /// Label every actionable element for the keyboard (jump mode).
+    JumpToElement,
     SendPrompt,
     StopRun,
     ShowFiles,
@@ -268,6 +270,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         "composer.focus",
         "Focus composer",
         Some("mod+l"),
+    ),
+    cmd(
+        CommandId::JumpToElement,
+        "workbench.jump",
+        "Jump to element",
+        Some("mod+shift+j"),
     ),
     cmd(CommandId::SendPrompt, "composer.send", "Send prompt", None),
     cmd(CommandId::StopRun, "run.stop", "Stop run", None),

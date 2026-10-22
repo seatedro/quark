@@ -13,7 +13,7 @@ use quark_ui::FocusId;
 use quark_ui::accessibility::{AccessibilityFrame, Announcer};
 use quark_ui::animation::AnimationTable;
 use quark_ui::element::{
-    DragPreviewLayer, ElementCache, ElementHandles, ImeTarget, InputFrame, InputRouter,
+    DragPreviewLayer, ElementCache, ElementHandles, ImeTarget, InputFrame, InputRouter, JumpHints,
     TextInputHitArea, TooltipRegion,
 };
 use quark_ui::text_input::TextPointer;
@@ -62,6 +62,10 @@ pub(crate) struct WindowUiState {
     /// Paints the preview of the drag holding the pointer, or of the drag
     /// session over this window.
     pub(super) drag_preview: DragPreviewLayer,
+    pub(super) jump: JumpHints,
+    /// The last input was a key press jump mode took, so the text it
+    /// types, which comes next, goes nowhere.
+    pub(super) jump_took_key: bool,
     pub(super) accessibility: AccessibilityFrame,
     pub(super) announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
@@ -238,6 +242,8 @@ impl WindowUiState {
             element_handles: ElementHandles::default(),
             pointer_taken: false,
             drag_preview: DragPreviewLayer::default(),
+            jump: JumpHints::default(),
+            jump_took_key: false,
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
