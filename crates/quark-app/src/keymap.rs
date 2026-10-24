@@ -233,6 +233,11 @@ pub fn format_binding(binding: &str) -> String {
     let Some(key) = parts.pop() else {
         return binding.to_owned();
     };
+    // A lone letter reads as typed: an uppercase one looks like it needs
+    // Shift, which shows as its own symbol or word.
+    if parts.is_empty() && key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic() {
+        return key.to_ascii_lowercase();
+    }
     if cfg!(target_os = "macos") {
         return mac_binding(&parts, key);
     }
@@ -438,7 +443,8 @@ mod tests {
     #[test]
     fn format_binding_uses_display_names() {
         assert_eq!(format_binding("shift+/"), "?");
-        assert_eq!(format_binding("g g"), "G then G");
+        assert_eq!(format_binding("g g"), "g then g");
+        assert_eq!(format_binding("r"), "r");
         if cfg!(target_os = "macos") {
             assert_eq!(
                 format_binding("ctrl+shift+arrowup"),
@@ -449,8 +455,10 @@ mod tests {
                 "\u{21E7}\u{2318}\u{21A9}"
             );
             assert_eq!(format_binding("alt+h"), "\u{2325}H");
+            assert_eq!(format_binding("shift+r"), "\u{21E7}R");
         } else {
             assert_eq!(format_binding("ctrl+shift+arrowup"), "Ctrl+Shift+Up");
+            assert_eq!(format_binding("shift+r"), "Shift+R");
         }
     }
 }
