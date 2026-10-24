@@ -649,11 +649,19 @@ impl InputRouter {
         if let Some(capture) = &self.capture {
             return capture.drag.cursor();
         }
-        self.frame
-            .hits
-            .stack_at(x, y)
-            .into_iter()
-            .filter_map(|id| self.frame.hits.cursor(id))
+        self.cursor_over(&self.frame.hits.stack_at(x, y))
+    }
+
+    /// [`Self::cursor_at`] for `stack`, this frame's hit entries under the
+    /// pointer topmost first, so a caller that keeps the stack allocates
+    /// nothing.
+    pub fn cursor_over(&self, stack: &[HitId]) -> CursorHint {
+        if let Some(capture) = &self.capture {
+            return capture.drag.cursor();
+        }
+        stack
+            .iter()
+            .filter_map(|&id| self.frame.hits.cursor(id))
             .find(|cursor| *cursor != CursorHint::Default)
             .unwrap_or_default()
     }

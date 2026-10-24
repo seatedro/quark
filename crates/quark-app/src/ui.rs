@@ -1598,31 +1598,15 @@ impl<U: UiApp> UiAdapter<U> {
         self.parked.retain(|(handle, _)| *handle != Some(window));
     }
 
-    fn update_cursor(&self, cx: &mut EventContext) {
+    fn update_cursor(&mut self, cx: &mut EventContext) {
         let hint = self
             .win
             .pointer
             .map(|(x, y)| self.win.router.cursor_at(x, y))
             .unwrap_or_default();
-        cx.set_cursor(match hint {
-            CursorHint::Default => CursorIcon::Default,
-            CursorHint::Pointer => CursorIcon::Pointer,
-            CursorHint::Text => CursorIcon::Text,
-            CursorHint::ResizeCol => CursorIcon::ColResize,
-            CursorHint::ResizeRow => CursorIcon::RowResize,
-            CursorHint::ResizeNs => CursorIcon::NsResize,
-            CursorHint::ResizeEw => CursorIcon::EwResize,
-            CursorHint::ResizeNesw => CursorIcon::NeswResize,
-            CursorHint::ResizeNwse => CursorIcon::NwseResize,
-            CursorHint::Move => CursorIcon::Move,
-            CursorHint::Grab => CursorIcon::Grab,
-            CursorHint::Grabbing => CursorIcon::Grabbing,
-            CursorHint::NotAllowed => CursorIcon::NotAllowed,
-            CursorHint::Wait => CursorIcon::Wait,
-            CursorHint::Progress => CursorIcon::Progress,
-            CursorHint::Crosshair => CursorIcon::Crosshair,
-            CursorHint::Help => CursorIcon::Help,
-        });
+        let cursor = cursor_icon(hint);
+        self.win.cursor = cursor;
+        cx.set_cursor(cursor);
     }
 }
 
@@ -1858,6 +1842,14 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
+        // The frame may have shown or hidden an element under a still
+        // pointer, such as an action revealed by the hover it painted; the
+        // hovered set it leaves behind no longer differs on the next move.
+        let cursor = cursor_icon(self.win.router.cursor_over(&self.win.hovered));
+        if cursor != self.win.cursor {
+            self.win.cursor = cursor;
+            cx.set_cursor(cursor);
+        }
         // The frame may have moved a region under a still pointer.
         let win = &mut *self.win;
         if win
@@ -2204,6 +2196,28 @@ impl<U: UiApp> UiAdapter<U> {
             Some(Routed::Edit(target, command)) => self.edit(target, command, cx),
             None => tracing::debug!("unhandled accessibility request: {request:?}"),
         }
+    }
+}
+
+fn cursor_icon(hint: CursorHint) -> CursorIcon {
+    match hint {
+        CursorHint::Default => CursorIcon::Default,
+        CursorHint::Pointer => CursorIcon::Pointer,
+        CursorHint::Text => CursorIcon::Text,
+        CursorHint::ResizeCol => CursorIcon::ColResize,
+        CursorHint::ResizeRow => CursorIcon::RowResize,
+        CursorHint::ResizeNs => CursorIcon::NsResize,
+        CursorHint::ResizeEw => CursorIcon::EwResize,
+        CursorHint::ResizeNesw => CursorIcon::NeswResize,
+        CursorHint::ResizeNwse => CursorIcon::NwseResize,
+        CursorHint::Move => CursorIcon::Move,
+        CursorHint::Grab => CursorIcon::Grab,
+        CursorHint::Grabbing => CursorIcon::Grabbing,
+        CursorHint::NotAllowed => CursorIcon::NotAllowed,
+        CursorHint::Wait => CursorIcon::Wait,
+        CursorHint::Progress => CursorIcon::Progress,
+        CursorHint::Crosshair => CursorIcon::Crosshair,
+        CursorHint::Help => CursorIcon::Help,
     }
 }
 
@@ -2996,6 +3010,52 @@ mod tests {
             let after = ui.app().field.cursor();
             assert_eq!(after > before, grows, "{name}: cursor {before} -> {after}");
         }
+    }
+
+    const ROW: quark_ui::element::GroupId = quark_ui::element::GroupId::new("row");
+
+    /// A row whose button only shows while the row is hovered.
+    struct RevealApp;
+
+    impl UiApp for RevealApp {
+        type Action = Msg;
+        type Message = ();
+
+        fn view(&mut self, _cx: &mut ViewContext) -> AnyElement {
+            div()
+                .w(400.0)
+                .h(40.0)
+                .flex_row()
+                .interaction_group(ROW)
+                .child(div().w(300.0).h(40.0))
+                .child(
+                    div()
+                        .w(40.0)
+                        .h(40.0)
+                        .cursor(CursorHint::Pointer)
+                        .on_click(Msg::Save)
+                        .show_when(quark_ui::element::GroupCondition::HoveredOrFocusWithin(ROW)),
+                )
+                .into_any()
+        }
+
+        fn update(&mut self, Msg::Save: Msg, _cx: &mut UiContext) {}
+    }
+
+    // The hover that reveals the button paints the frame the button is in,
+    // so no later move changes what is hovered; the cursor must follow that
+    // frame.
+    #[test]
+    fn pointer_entering_a_revealed_action_shows_its_cursor() {
+        let mut ui = UiTestHarness::new(RevealApp, (400.0, 300.0), 1.0);
+        let main = ui.main_window();
+
+        ui.pointer_move((320.0, 20.0));
+        ui.pointer_move((321.0, 20.0));
+
+        assert_eq!(ui.window(main).cursor(), CursorIcon::Pointer);
+        ui.pointer_move((100.0, 200.0));
+        assert_eq!(ui.window(main).cursor(), CursorIcon::Default);
     }
 
     /// A 40 point title bar that moves the window, with a Save button at

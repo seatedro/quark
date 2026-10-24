@@ -17,6 +17,7 @@ use quark_ui::element::{
     TextInputHitArea, TooltipRegion,
 };
 use quark_ui::text_input::TextPointer;
+use winit::window::CursorIcon;
 
 use super::HoveredTooltip;
 use crate::WindowHandle;
@@ -51,6 +52,8 @@ pub(crate) struct WindowUiState {
     /// Hit entries under the pointer in the routed frame, topmost first:
     /// what hover styles were painted from.
     pub(super) hovered: Vec<HitId>,
+    /// The cursor last shown over this window.
+    pub(super) cursor: CursorIcon,
     /// Routes input through the last painted frame until the next replaces
     /// it.
     pub(super) router: InputRouter,
@@ -238,6 +241,7 @@ impl WindowUiState {
             focus_seen: None,
             pointer: None,
             hovered: Vec::new(),
+            cursor: CursorIcon::Default,
             router: InputRouter::default(),
             element_handles: ElementHandles::default(),
             pointer_taken: false,

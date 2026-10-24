@@ -134,6 +134,8 @@ pub struct FrameContext<'a> {
     pub(super) last_render: quark_render::FrameStats,
     /// Material regions to show once the frame is built, when they changed.
     pub(super) material_regions: Option<Vec<crate::platform::material::MaterialRect>>,
+    /// The pointer cursor to show once the frame is built.
+    pub(super) cursor: Option<CursorIcon>,
 }
 
 /// IME requests made while building a frame. The runner applies them to
@@ -182,6 +184,12 @@ impl FrameContext<'_> {
     /// they change.
     pub fn set_material_regions(&mut self, regions: Vec<crate::platform::material::MaterialRect>) {
         self.material_regions = Some(regions);
+    }
+
+    /// Show `cursor` over this window once the frame is built; see
+    /// [`EventContext::set_cursor`].
+    pub fn set_cursor(&mut self, cursor: CursorIcon) {
+        self.cursor = Some(cursor);
     }
 
     /// Place this window's IME candidate window, in logical points, once
@@ -421,6 +429,13 @@ impl EventContext<'_> {
     }
 
     pub fn set_cursor(&mut self, cursor: CursorIcon) {
+        #[cfg(feature = "test-support")]
+        if let Some(WindowEntry::Virtual(virtual_window)) =
+            self.window.and_then(|window| self.windows.get_mut(window))
+        {
+            virtual_window.cursor = cursor;
+            return;
+        }
         if let Some(window) = self.native() {
             window.set_cursor(cursor);
         }

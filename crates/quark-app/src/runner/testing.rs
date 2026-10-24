@@ -57,6 +57,8 @@ pub(crate) struct VirtualWindow {
     pub(crate) renderer_options: quark_render::renderer::RendererOptions,
     /// The material regions its frames last asked for.
     pub(crate) material_regions: Vec<crate::platform::material::MaterialRect>,
+    /// The cursor last shown over it.
+    pub(crate) cursor: winit::window::CursorIcon,
     /// Times frames were requested for, in ms since launch, sorted and
     /// deduplicated. One frame serves every request due by then, as the
     /// real frame clock does. A vector so a frame that schedules the next
@@ -88,6 +90,7 @@ impl VirtualWindow {
             window_drags: 0,
             title_double_clicks: 0,
             material_regions: Vec::new(),
+            cursor: Default::default(),
             renderer_options: Default::default(),
             frames: Vec::new(),
             last_frame_ms: None,
@@ -765,11 +768,15 @@ impl HeadlessRunner {
             accessibility_active: self.accessibility_active,
             last_render: Default::default(),
             material_regions: None,
+            cursor: None,
         };
         let scene = app.frame(&mut cx);
         let ime = cx.ime;
         if let Some(regions) = cx.material_regions.take() {
             virtual_window.material_regions = regions;
+        }
+        if let Some(cursor) = cx.cursor {
+            virtual_window.cursor = cursor;
         }
         virtual_window.ime.apply(ime);
         self.text.end_frame();

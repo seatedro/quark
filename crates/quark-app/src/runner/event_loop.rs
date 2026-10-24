@@ -409,6 +409,7 @@ impl<A: App> Runner<A> {
             accessibility_active: state.accessibility_state.is_active(),
             last_render: state.last_render,
             material_regions: None,
+            cursor: None,
         };
 
         // Through subsecond, a hot patch to the app's frame code takes effect
@@ -422,6 +423,9 @@ impl<A: App> Runner<A> {
         };
         let mut scene = scene;
         let ime = cx.ime;
+        if let Some(cursor) = cx.cursor {
+            state.window.set_cursor(cursor);
+        }
         if let Some(regions) = cx.material_regions.take() {
             // Field by field: the renderer stays borrowed for this frame.
             let shown = shown_material_regions(&state.surface, &regions);

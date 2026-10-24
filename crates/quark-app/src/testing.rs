@@ -830,6 +830,11 @@ impl<U: UiApp> UiWindow<'_, U> {
         self.ui.open(self.window).window_drags
     }
 
+    /// The cursor last shown over the window.
+    pub fn cursor(&self) -> winit::window::CursorIcon {
+        self.ui.open(self.window).cursor
+    }
+
     /// The native material regions the window's frames last asked for
     /// ([`crate::EventContext::set_material_regions`]).
     pub fn material_regions(&self) -> &[crate::platform::material::MaterialRect] {
