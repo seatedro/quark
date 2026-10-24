@@ -272,6 +272,7 @@ pub fn binding_label(binding: &Binding) -> String {
 pub fn binding_keys(binding: &Binding) -> Vec<String> {
     let m = binding.mods;
     let mac = cfg!(target_os = "macos");
+    let bare = !(m.ctrl || m.alt || m.shift || m.cmd || m.primary);
     let mut out = Vec::new();
     let mut push = |part: &str| out.push(part.to_owned());
     if m.ctrl || (m.primary && !mac) {
@@ -300,6 +301,11 @@ pub fn binding_keys(binding: &Binding) -> Vec<String> {
         "arrowright" => "Right".to_owned(),
         "pageup" => "Page Up".to_owned(),
         "pagedown" => "Page Down".to_owned(),
+        // A lone letter reads as typed: an uppercase one looks like it
+        // needs Shift, which has its own keycap.
+        key if bare && key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic() => {
+            key.to_ascii_lowercase()
+        }
         key => {
             let mut chars = key.chars();
             match chars.next() {
@@ -1214,6 +1220,19 @@ fn title_runs<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A lone letter must not read as Shift plus that letter.
+    #[test]
+    fn binding_keys_show_a_lone_letter_as_typed() {
+        let keys = |text: &str| binding_keys(&text.parse::<Binding>().unwrap());
+        let shift = if cfg!(target_os = "macos") {
+            "\u{21E7}"
+        } else {
+            "Shift"
+        };
+        assert_eq!(keys("r"), ["r"]);
+        assert_eq!(keys("shift+r"), [shift, "R"]);
+    }
 
     /// Candidates `query` matches, best first, by the order the palette
     /// shows them.
