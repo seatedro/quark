@@ -318,7 +318,10 @@ impl Inner {
     }
 
     /// Check what a mutation of `idx` touched, or the whole store under
-    /// the `integrity-checks` feature. Debug builds only.
+    /// the `integrity-checks` feature. Debug builds only (skipped under
+    /// Kani, whose `#[kani::unwind(2)]` slot-reuse proof otherwise explodes
+    /// on the edge-scanning loops inside `verify_node`).
+    #[cfg(not(kani))]
     fn debug_check(&self, idx: usize) {
         if crate::selection::FULL_INTEGRITY_CHECKS {
             debug_assert_eq!(self.verify(), Ok(()));
@@ -326,6 +329,9 @@ impl Inner {
             debug_assert_eq!(self.verify_node(idx), Ok(()));
         }
     }
+
+    #[cfg(kani)]
+    fn debug_check(&self, _idx: usize) {}
 }
 
 /// Clears the computing mark when a compute finishes or unwinds.
