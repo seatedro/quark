@@ -28,6 +28,7 @@ struct Window {
     theme: Theme,
     scale: f32,
     pointer: Option<(f32, f32)>,
+    focus: Option<FocusId>,
     /// Assistive tech listens.
     accessibility: bool,
     cache: ElementCache,
@@ -37,6 +38,8 @@ struct Frame {
     scene: Scene,
     input: InputFrame,
     accessibility: AccessibilityFrame,
+    /// When the frame asked to be painted again.
+    next_frame_ms: Option<u64>,
 }
 
 impl Window {
@@ -48,6 +51,7 @@ impl Window {
             theme: Theme::default_dark(),
             scale: 1.0,
             pointer: None,
+            focus: None,
             accessibility: true,
             cache: ElementCache::new(),
         }
@@ -65,6 +69,7 @@ impl Window {
             self.pointer,
             &self.signals,
         )
+        .with_focus(self.focus)
         .with_accessibility(self.accessibility);
         if cache {
             cx = cx.with_element_cache(&mut self.cache);
@@ -77,6 +82,7 @@ impl Window {
             scene,
             input: cx.take_input_frame(),
             accessibility: std::mem::take(&mut cx.accessibility),
+            next_frame_ms: cx.next_frame_ms(),
         }
     }
 
@@ -91,6 +97,7 @@ impl Window {
             mut scene,
             input,
             mut accessibility,
+            ..
         } = last;
         scene.primitives.clear();
         accessibility.reset(400.0, 300.0);
@@ -103,6 +110,7 @@ impl Window {
             self.pointer,
             &self.signals,
         )
+        .with_focus(self.focus)
         .with_accessibility(self.accessibility)
         .with_element_cache(&mut self.cache)
         .with_input_frame(input);
@@ -113,6 +121,7 @@ impl Window {
             scene,
             input: cx.take_input_frame(),
             accessibility: std::mem::take(&mut cx.accessibility),
+            next_frame_ms: cx.next_frame_ms(),
         }
     }
 }
@@ -735,6 +744,224 @@ fn a_boundary_under_a_new_key_reuses_an_evicted_rows_buffers() {
 
     assert_eq!(frame.fills(), [HOVER]);
     assert_eq!(allocated, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Signals
+// ---------------------------------------------------------------------------
+
+/// A 100x30 swatch filled with the color `fill` holds, in a reactive
+/// boundary keyed `key`; `builds` counts its builds.
+fn signal_swatch(key: &str, fill: Signal<Color>, builds: &Rc<Cell<u32>>) -> AnyElement {
+    let builds = builds.clone();
+    reactive(key, move |cx| {
+        builds.set(builds.get() + 1);
+        div().w(100.0).h(30.0).bg(cx.read(fill))
+    })
+    .w(100.0)
+    .h(30.0)
+    .into_any()
+}
+
+#[test]
+fn writing_a_signal_rebuilds_only_the_boundary_that_read_it() {
+    let mut window = Window::new();
+    let left = window.signals.create(BUTTON);
+    let right = window.signals.create(BUTTON);
+    let builds = [Rc::new(Cell::new(0)), Rc::new(Cell::new(0))];
+    let root = |builds: &[Rc<Cell<u32>>; 2]| {
+        div()
+            .flex_row()
+            .child(signal_swatch("left", left, &builds[0]))
+            .child(signal_swatch("right", right, &builds[1]))
+            .into_any()
+    };
+    window.paint(root(&builds));
+
+    window.signals.write(left, HOVER);
+    let frame = window.paint(root(&builds));
+
+    assert_eq!(frame.fills(), [HOVER, BUTTON]);
+    assert_eq!([builds[0].get(), builds[1].get()], [2, 1]);
+}
+
+// Checking a recording's reads, and reporting them to an enclosing
+// scope, run in reused buffers.
+#[test]
+fn a_frame_after_an_unrelated_signal_write_replays_without_allocating() {
+    let mut window = Window::new();
+    window.accessibility = false;
+    let fill = window.signals.create(BUTTON);
+    let unrelated = window.signals.create(0u32);
+    let builds = Rc::new(Cell::new(0));
+    let mut frame = window.paint(signal_swatch("swatch", fill, &builds));
+    frame = window.repaint(signal_swatch("swatch", fill, &builds), frame);
+    window.signals.write(unrelated, 1);
+
+    let (frame, allocated) =
+        test_alloc::count(|| window.repaint(signal_swatch("swatch", fill, &builds), frame));
+
+    assert_eq!(frame.fills(), [BUTTON]);
+    assert_eq!(builds.get(), 1);
+    assert_eq!(allocated, 0);
+}
+
+/// An outer reactive boundary over a strip filled with `outer` and two
+/// nested swatches filled with `inner`; `builds` counts the outer
+/// boundary's, the first swatch's, and the second's builds.
+fn nested(
+    outer: Signal<Color>,
+    inner: [Signal<Color>; 2],
+    builds: &[Rc<Cell<u32>>; 3],
+) -> AnyElement {
+    let builds = builds.clone();
+    reactive("outer", move |cx| {
+        builds[0].set(builds[0].get() + 1);
+        div()
+            .flex_col()
+            .child(div().w(100.0).h(10.0).bg(cx.read(outer)))
+            .child(signal_swatch("first", inner[0], &builds[1]))
+            .child(signal_swatch("second", inner[1], &builds[2]))
+    })
+    .into_any()
+}
+
+struct Nested {
+    window: Window,
+    outer: Signal<Color>,
+    inner: [Signal<Color>; 2],
+    builds: [Rc<Cell<u32>>; 3],
+}
+
+impl Nested {
+    /// [`nested`], painted once, every fill `BUTTON`.
+    fn new() -> Self {
+        let mut window = Window::new();
+        let outer = window.signals.create(BUTTON);
+        let inner = [window.signals.create(BUTTON), window.signals.create(BUTTON)];
+        let builds = Default::default();
+        window.paint(nested(outer, inner, &builds));
+        Self {
+            window,
+            outer,
+            inner,
+            builds,
+        }
+    }
+
+    fn paint(&mut self) -> Frame {
+        let root = nested(self.outer, self.inner, &self.builds);
+        self.window.paint(root)
+    }
+
+    fn builds(&self) -> [u32; 3] {
+        self.builds.each_ref().map(|b| b.get())
+    }
+}
+
+#[test]
+fn a_signal_only_the_outer_boundary_read_leaves_the_nested_ones_replaying() {
+    let mut ui = Nested::new();
+
+    ui.window.signals.write(ui.outer, HOVER);
+    let frame = ui.paint();
+
+    assert_eq!(frame.fills(), [HOVER, BUTTON, BUTTON]);
+    assert_eq!(ui.builds(), [2, 1, 1]);
+}
+
+#[test]
+fn a_signal_one_nested_boundary_read_rebuilds_it_and_its_encloser_but_not_its_sibling() {
+    let mut ui = Nested::new();
+
+    ui.window.signals.write(ui.inner[0], HOVER);
+    let frame = ui.paint();
+
+    assert_eq!(frame.fills(), [BUTTON, HOVER, BUTTON]);
+    assert_eq!(ui.builds(), [2, 2, 1]);
+}
+
+// Catches a boundary rebuilt around a replayed one forgetting what the
+// replayed one read: its recording holds the replayed output, so it must
+// not replay once that goes stale.
+#[test]
+fn a_boundary_rebuilt_around_a_replayed_one_depends_on_what_that_one_read() {
+    let mut ui = Nested::new();
+    ui.window.signals.write(ui.inner[0], HOVER);
+    ui.paint();
+
+    ui.window.signals.write(ui.inner[1], HOVER);
+    let frame = ui.paint();
+
+    assert_eq!(frame.fills(), [BUTTON, HOVER, HOVER]);
+}
+
+#[test]
+fn moving_focus_rebuilds_a_boundary_that_painted_a_focus_style() {
+    const TARGET: FocusId = FocusId::from_key("target");
+    let mut window = Window::new();
+    let root = || {
+        reactive("focusable", |_| {
+            div()
+                .w(100.0)
+                .h(30.0)
+                .bg(BUTTON)
+                .focus_ring(TARGET)
+                .focus_visible(|s| s.bg(HOVER))
+        })
+        .into_any()
+    };
+    window.paint(root());
+
+    window.focus = Some(TARGET);
+    let frame = window.paint(root());
+
+    assert_eq!(frame.fills(), [HOVER]);
+}
+
+/// A swatch filled `HOVER` once `handle` has scrolled and `BUTTON` before,
+/// above [`scroller`] over the same handle.
+fn scroll_indicator(handle: &ScrollHandle) -> AnyElement {
+    let read = handle.clone();
+    div()
+        .flex_col()
+        .child(reactive("indicator", move |_| {
+            let scrolled = read.offset().1 > 0.0;
+            div()
+                .w(10.0)
+                .h(10.0)
+                .bg(if scrolled { HOVER } else { BUTTON })
+        }))
+        .child(scroller(handle))
+        .into_any()
+}
+
+// The container resolves a requested jump after the indicator painted:
+// that frame cannot show it, so it asks for the next one.
+#[test]
+fn a_boundary_that_read_a_scroll_offset_shows_a_jump_the_frame_after() {
+    let mut window = Window::new();
+    let handle = ScrollHandle::new();
+    window.paint(scroll_indicator(&handle));
+    handle.set_offset(0.0, 60.0);
+
+    let first = window.paint(scroll_indicator(&handle));
+    let second = window.paint(scroll_indicator(&handle));
+
+    assert_eq!(first.next_frame_ms, Some(0));
+    assert_eq!(second.fills().first(), Some(&HOVER));
+}
+
+#[test]
+fn a_jump_no_reader_saw_asks_for_no_further_frame() {
+    let mut window = Window::new();
+    let handle = ScrollHandle::new();
+    window.paint(scroller(&handle));
+    handle.set_offset(0.0, 60.0);
+
+    let frame = window.paint(scroller(&handle));
+
+    assert_eq!(frame.next_frame_ms, None);
 }
 
 const ROWS: usize = 2_000;

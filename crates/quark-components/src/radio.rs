@@ -87,7 +87,8 @@ impl RenderOnce for RadioGroup {
         let base = FocusId::from_key(&self.id);
         // The arrows move from the focused option, or from the chosen one
         // when focus is elsewhere in the group's subtree.
-        let focused = (0..options.len()).find(|&i| cx.focus == Some(list_nav::item_focus(base, i)));
+        let focused =
+            (0..options.len()).find(|&i| cx.focused() == Some(list_nav::item_focus(base, i)));
         let current = focused.or(self.selected);
         let tab_stop = self
             .selected

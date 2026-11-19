@@ -24,6 +24,11 @@ use super::*;
 use crate::design::ScrollbarSz;
 use crate::theme::scaled_or;
 
+mod published;
+
+use published::Published;
+pub(crate) use published::{Publish, ScrollBinding, ScrollWatch};
+
 /// Distance one arrow key scrolls.
 pub const KEY_LINE_PX: f32 = 2.0 * WHEEL_LINE_PX;
 /// How long scrollbars of an auto-hiding container stay after it scrolls.
@@ -402,15 +407,25 @@ struct ScrollState {
     /// ([`ScrollHandle::rebase`]): a document tells user intent from
     /// layout by it.
     input: u64,
+    /// The signal the handle publishes what it paints to, once a frame
+    /// with an element cache has painted it.
+    published: Cell<Option<Published>>,
+    /// A tracked reader saw the published state since it was last
+    /// published.
+    observed: Cell<bool>,
 }
 
 /// Shared, retained scroll state of one container; clones refer to the same
 /// state. Keep one per scrolling container in app state and pass it to
 /// [`Div::track_scroll`] every frame.
 ///
-/// A [`cached`](super::cached) boundary watches the handles its subtree
-/// paints and rebuilds when one moves or has motion pending, so its inputs
-/// hash need not cover the offset.
+/// The handle publishes what its container paints (offset, extent, thumb
+/// drag, and whether anything is pending or moving) to a signal in the
+/// window's [`SignalStore`]. A [`cached`](super::cached) boundary whose
+/// subtree paints the handle, or whose build reads it through
+/// [`Self::offset`], [`Self::max_offset`], [`Self::is_settled`], or
+/// [`Self::is_moving`], depends on that signal and rebuilds when it
+/// changes, so its inputs hash need not cover the offset.
 #[derive(Clone)]
 pub struct ScrollHandle(Rc<RefCell<ScrollState>>, ScrollbarVisibility);
 
@@ -447,6 +462,8 @@ impl ScrollHandle {
             samples: Samples::default(),
             dragging: None,
             input: 0,
+            published: Cell::new(None),
+            observed: Cell::new(false),
         }));
         Self(state, ScrollbarVisibility::new())
     }
@@ -467,6 +484,7 @@ impl ScrollHandle {
 
     /// [`Self::offset`] as the handle keeps it.
     pub fn offset_f64(&self) -> (f64, f64) {
+        self.track();
         let s = self.0.borrow();
         (s.offset[0], s.offset[1])
     }
@@ -479,6 +497,7 @@ impl ScrollHandle {
 
     /// [`Self::max_offset`] as the handle keeps it.
     pub fn max_offset_f64(&self) -> (f64, f64) {
+        self.track();
         let s = self.0.borrow();
         (s.max[0], s.max[1])
     }
@@ -534,12 +553,14 @@ impl ScrollHandle {
     /// Whether the offset is final until new input: no request waits for
     /// the next frame and no smooth scroll or fling is moving the content.
     pub fn is_settled(&self) -> bool {
+        self.track();
         let s = self.0.borrow();
         s.request.is_none() && s.smooth.is_none() && s.fling.is_none()
     }
 
     /// Whether a smooth scroll or fling is moving the content.
     pub fn is_moving(&self) -> bool {
+        self.track();
         let s = self.0.borrow();
         s.smooth.is_some() || s.fling.is_some()
     }
@@ -871,14 +892,13 @@ impl ScrollHandle {
     /// Start collecting keyed descendants and note the handle for an
     /// enclosing cache boundary. Returns the offset to paint children at.
     fn watch(&self, viewport: Rect, cx: &mut ElementContext) -> (f32, f32) {
+        // Published once resolved, and read: the enclosing boundary's
+        // output depends on it.
+        cx.publish_scroll(self);
+        self.track();
         let mut s = self.0.borrow_mut();
         s.recording.clear();
-        cx.watch_scroll(|| ScrollWatch {
-            handle: self.clone(),
-            offset: s.offset,
-            dragging: s.dragging,
-            viewport,
-        });
+        cx.watch_scroll(|| ScrollWatch::new(self.clone(), viewport));
         s.paint_offset()
     }
 
@@ -937,47 +957,6 @@ impl ScrollHandle {
     /// again after [`Self::end_frame`] moved the offset.
     pub(crate) fn restart_items(&self) {
         self.0.borrow_mut().recording.clear();
-    }
-}
-
-/// A handle as a cache boundary's subtree painted it. The boundary's
-/// recording may replay only while every handle it watched is
-/// [`unchanged`](Self::unchanged): replay skips the container's
-/// [`ScrollHandle::begin_frame`], which resolves requests and motion.
-#[derive(Clone)]
-pub(crate) struct ScrollWatch {
-    handle: ScrollHandle,
-    offset: [f64; 2],
-    dragging: Option<Axis>,
-    /// The container's bounds, in the coordinates of whoever holds the
-    /// watch (window points, or relative to a boundary's origin).
-    viewport: Rect,
-}
-
-impl ScrollWatch {
-    /// Whether the container would paint as watched: same offset and thumb
-    /// drag, nothing pending, nothing moving.
-    pub(crate) fn unchanged(&self) -> bool {
-        let s = self.handle.0.borrow();
-        s.offset == self.offset
-            && s.dragging == self.dragging
-            && s.request.is_none()
-            && s.smooth.is_none()
-            && s.fling.is_none()
-    }
-
-    /// The watch with its viewport moved by `(dx, dy)`.
-    pub(crate) fn offset(&self, dx: f32, dy: f32) -> Self {
-        Self {
-            viewport: self.viewport.offset(dx, dy),
-            ..self.clone()
-        }
-    }
-
-    /// A replay painted the container at the watched viewport: keep the
-    /// handle's viewport (page size, item positions) current.
-    pub(crate) fn replayed(&self) {
-        self.handle.0.borrow_mut().viewport = self.viewport;
     }
 }
 

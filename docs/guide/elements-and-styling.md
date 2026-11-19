@@ -22,6 +22,7 @@ From `quark_ui::element`:
 | `spacer()` | Flexible space |
 | `canvas(paint)` | A closure painting scene primitives into the element's bounds |
 | `cached(key, hash, build)` | A cache boundary ([Performance model](performance.md)) |
+| `reactive(key, build)` | A cache boundary whose inputs are the signals `build` reads |
 
 - `quark-components` adds: buttons, checkbox, switch, select, combobox,
   dropdown, picker, radio group, segmented control, slider, search field,

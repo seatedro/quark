@@ -82,7 +82,9 @@ mod transition;
 mod tests;
 
 pub use bounds::*;
-pub use cache::{CacheKey, Cached, ElementCache, cached, inputs_hash};
+pub use cache::{
+    CacheKey, Cached, ElementCache, WindowFrameState, WindowSignals, cached, inputs_hash, reactive,
+};
 pub use canvas::*;
 pub use code_block::*;
 pub use context::*;

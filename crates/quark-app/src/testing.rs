@@ -155,6 +155,13 @@ impl<U: UiApp> UiTestHarness<U> {
         self.adapter.app_mut()
     }
 
+    /// The app's signals. A write made through them shows after the next
+    /// frame, as with [`Self::app_mut`]; one the app makes in a callback
+    /// redraws by itself.
+    pub fn signals(&self) -> &quark::reactive::SignalStore {
+        self.adapter.signals()
+    }
+
     // ---- Windows ---------------------------------------------------------
 
     /// The window the harness opened with. Methods on the harness itself

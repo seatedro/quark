@@ -155,9 +155,9 @@ impl PaintRecord {
         }
     }
 
-    /// Whether every scroll handle the subtree painted is where it was.
-    pub(super) fn scroll_unchanged(&self) -> bool {
-        self.scroll.iter().all(ScrollWatch::unchanged)
+    /// The scroll handles the subtree painted.
+    pub(super) fn scroll(&self) -> &[ScrollWatch] {
+        &self.scroll
     }
 }
 
@@ -190,7 +190,6 @@ struct PaintMarks {
 #[derive(Clone, Copy)]
 struct PhaseStart {
     volatile: u32,
-    focus: u32,
     transitions: usize,
 }
 
@@ -198,7 +197,6 @@ impl PhaseStart {
     fn of(cx: &ElementContext) -> Self {
         Self {
             volatile: cx.volatile_reads(),
-            focus: cx.focus_reads(),
             transitions: cx.transition_keys().len(),
         }
     }
@@ -216,7 +214,6 @@ pub(super) struct Recording {
     z: i32,
     phase: PhaseStart,
     volatile: u32,
-    focus_reads: u32,
     extent: Option<Rect>,
     paint: Option<PaintMarks>,
 }
@@ -238,17 +235,16 @@ impl Recording {
             z: cx.current_z_index(),
             phase: PhaseStart::of(cx),
             volatile: 0,
-            focus_reads: 0,
             extent: None,
             paint: None,
         }
     }
 
-    /// Close a phase: count what the subtree read and keep the transition
-    /// keys it touched.
+    /// Close a phase: count the clock-dependent requests the subtree made
+    /// and keep the transition keys it touched. What it read is tracked as
+    /// signals.
     fn end_phase(&mut self, record: &mut PaintRecord, cx: &ElementContext) {
         self.volatile += cx.volatile_reads().wrapping_sub(self.phase.volatile);
-        self.focus_reads += cx.focus_reads().wrapping_sub(self.phase.focus);
         record
             .transitions
             .extend_from_slice(&cx.transition_keys()[self.phase.transitions..]);
@@ -419,7 +415,6 @@ impl Recording {
             (Some(extent), Some((x, y))) => extent.offset(ox, oy).contains(x, y),
             _ => false,
         };
-        let focus = (self.focus_reads > 0).then_some((cx.focus, cx.focus_visible));
         let (scale, font) = (cx.scale_factor, cx.text.font_epoch());
         let accessibility = cx.accessibility_enabled();
         let row = self.row as usize;
@@ -428,10 +423,8 @@ impl Recording {
         cache.inputs[row] = EntryInputs {
             hash: self.hash,
             scale,
-            theme: cache.theme_generation,
             font,
             accessibility,
-            focus,
             reusable: complete && self.volatile == 0 && !pointer_inside,
         };
         cache.inherited[row] = Inherited {

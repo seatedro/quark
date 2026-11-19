@@ -239,6 +239,8 @@ mod reorder_tests;
 mod runner;
 #[cfg(all(test, feature = "test-support"))]
 mod scroll_tests;
+#[cfg(all(test, feature = "test-support"))]
+mod signal_tests;
 #[cfg(feature = "test-support")]
 pub mod testing;
 #[cfg(feature = "ui")]

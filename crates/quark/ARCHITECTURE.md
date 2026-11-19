@@ -35,6 +35,42 @@ retries.
 whether to redraw, render, then call `clear_dirty()` so the next frame
 starts Clean.
 
+### Versions and snapshots
+
+Every slot carries a version stamped from the store's clock whenever its
+value changes: a write, or a memo recompute whose value differs. An
+observer that is not a memo, such as a cache boundary, keeps the
+`(SignalId, version)` pairs it read (`track_into`) and asks
+`any_changed(snapshot)` before reusing its output. The check walks the
+snapshot in read order, brings memos up to date on the way, stops at the
+first change, and allocates nothing when no memo recomputes.
+
+### Tracking scopes
+
+Scopes nest on one thread-local stack and a read lands in the innermost.
+`Nesting::Isolate` keeps a scope's reads from the enclosing one: a memo's
+compute, so its reader depends on the memo and the equality check can
+stop a change. `Nesting::Merge` hands them up as well: a cache boundary
+nested in another, whose output the outer recording contains. A replayed
+boundary reports its recorded reads with `track_reads` in place of
+reading them. A source that publishes into a signal and remembers the
+version can report a read without the store (`track_read_at`); before
+its first publish it reports `track_unpublished`, which is always stale.
+
+### Batches
+
+`batch(f)` updates values and versions at once but marks subscribers
+once, when the outermost batch ends. A memo read inside the batch applies
+the held-back writes first, so it never sees half a batch.
+
+### Integrity
+
+`verify_integrity()` checks the free list, edge symmetry, that a memo
+whose source may be stale is not `Clean`, versions against the clock, and
+the batch's held-back writes. Mutations run it through `debug_assert!`:
+the whole store with the `integrity-checks` feature, the touched slot
+otherwise.
+
 ### Memo equality short-circuit
 
 `create_memo` takes `Fn(&SignalStore) -> T` for `T: Clone + PartialEq`.

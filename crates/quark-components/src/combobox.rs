@@ -438,7 +438,7 @@ impl RenderOnce for Combobox {
         let scale = m.ui_scale();
         let width = self.width.unwrap_or((260.0 * scale).round());
         let msg = &self.on_msg;
-        let focused = cx.focus == Some(self.focus);
+        let focused = cx.focused() == Some(self.focus);
         let open = self.open && focused;
         let field_h = scaled_or(
             theme.components.select.height,

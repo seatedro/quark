@@ -85,7 +85,7 @@ impl RenderOnce for SegmentedControl {
         let base = FocusId::from_key(&self.id);
         let len = self.items.len();
         let selected = self.items.iter().position(|item| item.selected);
-        let focused = (0..len).find(|&i| cx.focus == Some(list_nav::item_focus(base, i)));
+        let focused = (0..len).find(|&i| cx.focused() == Some(list_nav::item_focus(base, i)));
         let current = focused.or(selected);
         let tab_stop = selected.or((len > 0).then_some(0));
 
