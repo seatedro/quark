@@ -822,6 +822,8 @@ fn a_frame_after_an_unrelated_signal_write_replays_without_allocating() {
     let unrelated = window.signals.create(0u32);
     let builds = Rc::new(Cell::new(0));
     let mut frame = window.paint(signal_swatch("swatch", fill, &builds));
+    // Two replays warm both halves of LayoutEngine's ping-pong replay_memo buffer.
+    frame = window.repaint(signal_swatch("swatch", fill, &builds), frame);
     frame = window.repaint(signal_swatch("swatch", fill, &builds), frame);
     window.signals.write(unrelated, 1);
 
