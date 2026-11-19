@@ -58,7 +58,7 @@ impl Cache {
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("quark text shader"),
-            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: ShaderSource::Wgsl(Cow::Borrowed(crate::shaders::TEXT_SHADER)),
         });
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
