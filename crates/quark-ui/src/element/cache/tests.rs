@@ -555,6 +555,33 @@ fn a_resized_fixed_boundary_rewraps_its_text() {
     assert!(narrow[0].len() > 1, "{narrow:?}");
 }
 
+/// A cached bar `height` points tall, hashed by its height, in the div
+/// keyed `parent`, above a marker.
+fn bar_under(parent: &'static str, height: f32) -> AnyElement {
+    let bar = cached("bar", height as u64, move || {
+        div().w(50.0).h(height).bg(BUTTON)
+    });
+    div()
+        .size_full()
+        .flex_col()
+        .child(div().key(parent).flex_col().child(bar))
+        .child(div().w(50.0).h(5.0).bg(HOVER))
+        .into_any()
+}
+
+/// The boundary replays in "a", rebuilds taller in "b", then replays in
+/// "a" again: the layout nodes "a" left behind must not size it as their
+/// last replay did.
+#[test]
+fn a_boundary_replayed_back_under_its_old_parent_takes_its_new_size() {
+    let mut window = Window::new();
+    for (parent, height) in [("a", 10.0), ("a", 10.0), ("b", 30.0), ("b", 30.0)] {
+        window.paint(bar_under(parent, height));
+    }
+    let back = window.paint(bar_under("a", 30.0));
+    assert_eq!(back.rect_of(HOVER).map(|r| r.y), Some(30.0));
+}
+
 /// A 4pt `h_full` bar beside a 30pt tall box, in a row `height` tall
 /// (`None`: as tall as its content). With `boundary` the bar is a
 /// `fill_height` boundary around `h_full` content.

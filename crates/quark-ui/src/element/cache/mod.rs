@@ -72,7 +72,7 @@ use std::hash::{BuildHasherDefault, DefaultHasher, Hash, Hasher};
 
 use quark::reactive::{SignalRead, track_reads};
 
-use super::layout::MeasureMemo;
+use super::layout::{LayoutPassState, MeasureMemo};
 use super::scroll::ScrollBinding;
 use super::*;
 use record::{Inherited, PaintRecord, Recording};
@@ -83,10 +83,6 @@ mod record;
 mod signals;
 #[cfg(test)]
 mod tests;
-
-/// Layout passes a frame may run: replayed boundaries that went stale are
-/// rebuilt in the next pass, and the last pass replays nothing.
-pub(super) const LAYOUT_PASSES: usize = 3;
 
 /// Evicted rows whose buffers are kept for new rows.
 const SPARE_ROWS: usize = 64;
@@ -409,10 +405,10 @@ pub(super) fn begin_frame(cx: &mut ElementContext) -> LayoutEngine {
     engine
 }
 
-pub(super) fn begin_layout_pass(cx: &mut ElementContext, pass: usize) {
+pub(super) fn begin_layout_pass(cx: &mut ElementContext, state: LayoutPassState) {
     if let Some(cache) = cx.cache.as_deref_mut() {
         cache.pass += 1;
-        cache.replay = pass + 1 < LAYOUT_PASSES;
+        cache.replay = state.replays();
     }
 }
 
@@ -695,6 +691,7 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
                     self.style.layout.clone(),
                     &cache.memo[row as usize],
                     row,
+                    self.key,
                 );
                 self.state = State::Replay { row };
                 return (id, ());
@@ -710,7 +707,7 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
         let row = entry.map(|(row, _)| row);
         let (child, index, content) = tracked(cx, row, fresh, |cx| {
             let mut child = built.unwrap_or_else(|| self.build(cx));
-            let index = engine.begin_subtree();
+            let index = engine.begin_subtree(self.key);
             let content = child.request_layout(engine.subtree_mut(index), cx);
             (child, index, content)
         });

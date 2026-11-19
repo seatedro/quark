@@ -50,10 +50,7 @@ pub fn render_element_at(
     cx.devtools.record_phases(started, laid_out);
 }
 
-/// Lay out `root`. A replayed cache boundary asked a measure query it has
-/// no answer for (its parent offers a new size) goes stale: its entry is
-/// dropped and the pass runs again, rebuilding it. The last pass replays
-/// nothing, so this always ends.
+/// Lay out `root`, running passes until [`LayoutPassState::Done`].
 fn layout_root(
     root: &mut AnyElement,
     engine: &mut LayoutEngine,
@@ -62,12 +59,14 @@ fn layout_root(
     height: f32,
 ) {
     let mut stale = Vec::new();
-    for pass in 0..cache::LAYOUT_PASSES {
-        cache::begin_layout_pass(cx, pass);
+    let mut state = LayoutPassState::Initial;
+    loop {
+        cache::begin_layout_pass(cx, state);
         let root_id = root.request_layout(engine, cx);
         engine.compute_layout(root_id, width, height, &mut cx.measure_context());
         engine.drain_stale(&mut stale);
-        if stale.is_empty() {
+        state = state.next(!stale.is_empty());
+        if state == LayoutPassState::Done {
             return;
         }
         cache::invalidate(cx, &stale);

@@ -3799,6 +3799,7 @@ dependencies = [
  "quark-i18n",
  "quark-render",
  "quark-text",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
  "spellbook",

@@ -993,12 +993,17 @@ impl Element for Div {
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
         // Layout children first, collecting their IDs on the engine's stack.
-        let mark = engine.begin_children();
+        let key = self
+            .semantic_key
+            .as_ref()
+            .map(UiKey::as_str)
+            .map(quark::stable_hash);
+        engine.begin_children(key);
         for child in self.children.iter_mut() {
             let id = child.request_layout(engine, cx);
             engine.push_child(id);
         }
-        let id = engine.finish_children(&self.base_style.layout, mark);
+        let id = engine.finish_children(&self.base_style.layout);
         (id, id)
     }
 
