@@ -289,10 +289,7 @@ impl Workbench {
     /// Ask the shell to show the right dock; below the dock breakpoint it
     /// opens anyway, as the toggle does. The next frame applies it.
     fn show_dock(&mut self) {
-        self.shell.dock_wanted = true;
-        if self.main_size.0 < shell::DOCK_BREAKPOINT {
-            self.shell.dock_forced = true;
-        }
+        shell::show_dock(&mut self.shell, self.main_size.0);
     }
 
     fn send_prompt(&mut self, thread: crate::contracts::ThreadId, text: &str, cx: &mut UiContext) {

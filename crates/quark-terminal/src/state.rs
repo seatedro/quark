@@ -293,12 +293,11 @@ struct SelectDrag {
 /// pointer reports come from the app's raw input hook through
 /// [`Self::key_press`], [`Self::text_input`], and [`Self::pointer`];
 /// selection comes from the view as [`TerminalEvent`]s for [`Self::handle`].
-#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub struct TerminalState {
     id: &'static str,
     focus: FocusId,
     vt: Terminal,
-    pty: Option<Pty>,
+    program: Program,
     /// Bytes for the program while no PTY is attached (tests read them).
     outbox: Vec<u8>,
     /// Input for the PTY that did not fit its queue yet, oldest first; at
@@ -322,10 +321,7 @@ pub struct TerminalState {
     screen_text: Option<(u64, Arc<str>)>,
     screen_buf: String,
     scroll: ScrollHandle,
-    /// The scrollbar row the handle and the terminal last agreed on.
-    synced_row: u64,
-    /// An offset this state asked the handle for, applied by the next frame.
-    pending_scroll: bool,
+    scroll_sync: ScrollSync,
     /// Bumped each frame the handle is moving, so the view rebuilds.
     nonce: u64,
     /// The rows block's bounds in the window as of the last frame.
@@ -342,14 +338,43 @@ pub struct TerminalState {
     buttons_down: u8,
     /// Wheel motion not yet sent as whole lines (touchpads send fractions).
     wheel: f32,
-    /// The key press just encoded typed text: skip the text event after it.
-    swallow_text: bool,
-    preedit: Option<Preedit>,
+    entry: TextEntry,
     /// Revision of the last composition change.
     preedit_revision: u64,
     title: Rc<str>,
     signals: Vec<TerminalSignal>,
-    exited: bool,
+}
+
+/// The program behind the terminal.
+enum Program {
+    /// None yet: input waits in the outbox.
+    Detached,
+    Running(Pty),
+    /// The program exited; input waits in the outbox.
+    Exited,
+}
+
+/// How the scroll handle and the terminal's viewport agree on the
+/// scrollbar row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollSync {
+    /// Both were last on this row.
+    Synced(u64),
+    /// The terminal moved to this row and asked the handle for its
+    /// offset, which the next frame applies.
+    Requested(u64),
+}
+
+/// Text input between the platform's key and text events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TextEntry {
+    Idle,
+    /// The key press just encoded the text it typed: the text event after
+    /// it is skipped.
+    Typed,
+    /// An IME composition, painted at the cursor until the IME commits or
+    /// cancels it.
+    Composing(Preedit),
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -372,7 +397,7 @@ impl TerminalState {
             id,
             focus,
             vt,
-            pty: None,
+            program: Program::Detached,
             outbox: Vec::new(),
             unsent: VecDeque::new(),
             style,
@@ -387,8 +412,7 @@ impl TerminalState {
             screen_text: None,
             screen_buf: String::new(),
             scroll: ScrollHandle::new(),
-            synced_row: 0,
-            pending_scroll: false,
+            scroll_sync: ScrollSync::Synced(0),
             nonce: 0,
             bounds: Rc::default(),
             row_text: Rc::default(),
@@ -399,12 +423,10 @@ impl TerminalState {
             pointer: None,
             buttons_down: 0,
             wheel: 0.0,
-            swallow_text: false,
-            preedit: None,
+            entry: TextEntry::Idle,
             preedit_revision: 0,
             title: Rc::from(""),
             signals: Vec::new(),
-            exited: false,
         }
     }
 
@@ -468,7 +490,7 @@ impl TerminalState {
     }
 
     pub fn has_exited(&self) -> bool {
-        self.exited
+        matches!(self.program, Program::Exited)
     }
 
     /// Whether pointer input inside the terminal should go to the program
@@ -505,9 +527,8 @@ impl TerminalState {
         on_ready: impl Fn() + Send + 'static,
     ) -> std::io::Result<()> {
         let pty = Pty::spawn(command, self.geometry(), on_ready)?;
-        self.pty = Some(pty);
+        self.program = Program::Running(pty);
         self.unsent.clear();
-        self.exited = false;
         self.flush();
         Ok(())
     }
@@ -527,9 +548,10 @@ impl TerminalState {
     /// Feeds the PTY's waiting output through the VT, and handles its exit
     /// once the output before it is fed. Returns whether there was any.
     pub fn read_pty(&mut self) -> bool {
-        let Some(inbox) = self.pty.as_ref().map(Pty::inbox) else {
+        let Program::Running(pty) = &self.program else {
             return false;
         };
+        let inbox = pty.inbox();
         self.send_unsent();
         let mut any = false;
         inbox.drain(|event| {
@@ -543,8 +565,7 @@ impl TerminalState {
         match event {
             PtyEvent::Output(bytes) => self.feed(bytes),
             PtyEvent::Exited(code) => {
-                self.exited = true;
-                self.pty = None;
+                self.program = Program::Exited;
                 self.unsent.clear();
                 self.signals.push(TerminalSignal::Exited(code));
             }
@@ -576,7 +597,7 @@ impl TerminalState {
     }
 
     fn send(&mut self, bytes: &[u8]) {
-        if self.pty.is_none() {
+        if !matches!(self.program, Program::Running(_)) {
             self.outbox.extend_from_slice(bytes);
             return;
         }
@@ -591,7 +612,7 @@ impl TerminalState {
     /// Offers the PTY the input its queue turned away. The PTY wakes the
     /// app ([`Self::read_pty`]) once there is room again.
     fn send_unsent(&mut self) {
-        let Some(pty) = &mut self.pty else {
+        let Program::Running(pty) = &mut self.program else {
             return;
         };
         while !self.unsent.is_empty() {
@@ -635,12 +656,12 @@ impl TerminalState {
     /// keyboard modes (including the Kitty protocol) and sent.
     pub fn key_press(&mut self, press: &KeyPress) -> TerminalOutcome {
         self.modifiers = press.modifiers;
-        self.swallow_text = false;
         // Keys pressed while composing are the IME's to interpret; only
         // its commit reaches the program.
-        if self.preedit.is_some() {
+        if let TextEntry::Composing(_) = self.entry {
             return TerminalOutcome::Handled;
         }
+        self.entry = TextEntry::Idle;
         let Some((key, unshifted)) = press.key() else {
             return TerminalOutcome::Ignored;
         };
@@ -678,7 +699,9 @@ impl TerminalState {
             },
         };
         if self.vt.key(&input) {
-            self.swallow_text = press.typed().is_some();
+            if press.typed().is_some() {
+                self.entry = TextEntry::Typed;
+            }
             self.after_input();
         }
         TerminalOutcome::Handled
@@ -689,7 +712,9 @@ impl TerminalState {
     /// Ends a composition still showing, as its commit.
     pub fn text_input(&mut self, text: &str) {
         self.cancel_preedit();
-        if std::mem::take(&mut self.swallow_text) || text.is_empty() {
+        // The key press before it already sent the text.
+        let sent = std::mem::replace(&mut self.entry, TextEntry::Idle) == TextEntry::Typed;
+        if sent || text.is_empty() {
             return;
         }
         // Committed text is inserted as typed, not as a paste.
@@ -708,7 +733,9 @@ impl TerminalState {
         // An IME event between a key press and the text after it makes
         // that text the IME's commit, which must not be swallowed as the
         // key's own.
-        self.swallow_text = false;
+        if self.entry == TextEntry::Typed {
+            self.entry = TextEntry::Idle;
+        }
         if text.is_empty() {
             self.cancel_preedit();
             return;
@@ -718,7 +745,7 @@ impl TerminalState {
             let range = quark_text::offset::ordered(text, start..end);
             range.start.get()..range.end.get()
         });
-        self.preedit = Some(Preedit {
+        self.entry = TextEntry::Composing(Preedit {
             text: text.to_owned(),
             selection,
             revision: self.preedit_revision,
@@ -729,10 +756,10 @@ impl TerminalState {
     /// the terminal lost focus, or another element took it. Returns whether
     /// there was one.
     pub fn cancel_preedit(&mut self) -> bool {
-        if self.preedit.take().is_none() {
+        if !matches!(self.entry, TextEntry::Composing(_)) {
             return false;
         }
-        self.swallow_text = false;
+        self.entry = TextEntry::Idle;
         self.preedit_revision += 1;
         true
     }
@@ -741,13 +768,16 @@ impl TerminalState {
     /// program once, as typed.
     pub fn commit_preedit(&mut self, text: &str) {
         self.cancel_preedit();
-        self.swallow_text = false;
+        self.entry = TextEntry::Idle;
         self.text_input(text);
     }
 
     /// The composition showing at the cursor.
     pub fn preedit(&self) -> Option<&Preedit> {
-        self.preedit.as_ref()
+        match &self.entry {
+            TextEntry::Composing(preedit) => Some(preedit),
+            TextEntry::Idle | TextEntry::Typed => None,
+        }
     }
 
     /// Pastes `text` framed for the program's modes (bracketed paste when
@@ -1137,7 +1167,7 @@ impl TerminalState {
             self.vt
                 .resize(cols, rows, m.cell.cell_width, m.cell.cell_height);
             let geometry = self.geometry();
-            if let Some(pty) = &mut self.pty {
+            if let Program::Running(pty) = &mut self.program {
                 let _ = pty.resize(geometry);
             }
             self.flush();
@@ -1237,30 +1267,33 @@ impl TerminalState {
             self.nonce += 1;
         }
         let handle_row = (self.scroll.offset().1 / m.cell_h).round().max(0.0) as u64;
-        if std::mem::take(&mut self.pending_scroll) {
-            self.synced_row = handle_row;
-        } else if handle_row != self.synced_row {
-            self.vt.scroll(Scroll::Row(handle_row as usize));
-            self.synced_row = handle_row;
-            self.dirty = true;
-        }
+        let row = match self.scroll_sync {
+            // The handle took the offset asked of it.
+            ScrollSync::Requested(_) => handle_row,
+            ScrollSync::Synced(row) if row != handle_row => {
+                self.vt.scroll(Scroll::Row(handle_row as usize));
+                self.dirty = true;
+                handle_row
+            }
+            ScrollSync::Synced(row) => row,
+        };
         let offset = self.vt.scrollbar().offset;
-        if offset != self.synced_row {
+        self.scroll_sync = if offset == row {
+            ScrollSync::Synced(row)
+        } else {
             self.scroll.set_offset(0.0, offset as f32 * m.cell_h);
-            self.synced_row = offset;
-            self.pending_scroll = true;
             self.dirty = true;
-        }
+            ScrollSync::Requested(offset)
+        };
     }
 
     /// Where the rows block sits in the scroll content: the handle's offset,
     /// or the one requested this frame, so rows stay pinned to the top of
     /// the viewport.
     pub(crate) fn scroll_top(&self) -> f32 {
-        if self.pending_scroll {
-            self.synced_row as f32 * self.metrics().cell_h
-        } else {
-            self.scroll.offset().1
+        match self.scroll_sync {
+            ScrollSync::Requested(row) => row as f32 * self.metrics().cell_h,
+            ScrollSync::Synced(_) => self.scroll.offset().1,
         }
     }
 

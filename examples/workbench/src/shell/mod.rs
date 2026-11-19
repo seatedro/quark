@@ -27,22 +27,30 @@ pub const DOCK_BREAKPOINT: f32 = 1200.0;
 /// Narrower than this, the sidebar becomes an overlay.
 pub const SIDEBAR_BREAKPOINT: f32 = 1040.0;
 
-#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub struct State {
     pub sidebar: sidebar::State,
     /// The user wants the sidebar (Mod+B toggles).
     pub sidebar_wanted: bool,
-    /// The user wants the right dock (Mod+Alt+B toggles).
-    pub dock_wanted: bool,
-    /// Narrow layouts: the user opened the collapsed dock anyway. Cleared
-    /// once the window is wide enough to show it by itself.
-    pub dock_forced: bool,
     /// Narrow layouts: the sidebar overlay is open.
     pub sidebar_overlay: bool,
+    pub right_dock: DockWish,
     /// The policy last applied to the dock.
     pub applied: Option<WidthPolicy>,
     /// The title bar's content as of the last frame.
     title: Option<std::rc::Rc<titlebar::TitleData>>,
+}
+
+/// What the user wants of the right dock (Mod+Alt+B toggles), kept apart
+/// from whether it fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockWish {
+    Hidden,
+    /// Shown where it fits.
+    Shown,
+    /// Narrow layouts: the user opened the collapsed dock anyway. Becomes
+    /// [`DockWish::Shown`] once the window is wide enough to show it by
+    /// itself.
+    Forced,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,9 +73,8 @@ pub fn new_state() -> State {
     State {
         sidebar: sidebar::State::default(),
         sidebar_wanted: true,
-        dock_wanted: true,
-        dock_forced: false,
         sidebar_overlay: false,
+        right_dock: DockWish::Shown,
         applied: None,
         title: None,
     }
@@ -77,7 +84,21 @@ pub fn new_state() -> State {
 pub fn width_policy(state: &State, width: f32) -> WidthPolicy {
     WidthPolicy {
         sidebar_docked: state.sidebar_wanted && width >= SIDEBAR_BREAKPOINT,
-        right_dock_shown: state.dock_wanted && (width >= DOCK_BREAKPOINT || state.dock_forced),
+        right_dock_shown: match state.right_dock {
+            DockWish::Hidden => false,
+            DockWish::Shown => width >= DOCK_BREAKPOINT,
+            DockWish::Forced => true,
+        },
+    }
+}
+
+/// Show the right dock at `width`; below the dock breakpoint it opens
+/// anyway, as the toggle does.
+pub fn show_dock(state: &mut State, width: f32) {
+    if width < DOCK_BREAKPOINT {
+        state.right_dock = DockWish::Forced;
+    } else if state.right_dock == DockWish::Hidden {
+        state.right_dock = DockWish::Shown;
     }
 }
 
@@ -89,8 +110,8 @@ pub fn overlay_open(state: &State, policy: WidthPolicy) -> bool {
 /// The policy for the main window at `width`, and the region changes the
 /// dock needs to match it (none when nothing changed since last time).
 pub fn sync_width(state: &mut State, width: f32, fx: &mut Effects) -> WidthPolicy {
-    if width >= DOCK_BREAKPOINT {
-        state.dock_forced = false;
+    if width >= DOCK_BREAKPOINT && state.right_dock == DockWish::Forced {
+        state.right_dock = DockWish::Shown;
     }
     let policy = width_policy(state, width);
     if state.applied != Some(policy) {
@@ -168,16 +189,18 @@ pub fn command(state: &mut State, id: CommandId, scx: &SurfaceCx, fx: &mut Effec
             }
         }
         CommandId::ToggleRightDock => {
-            if scx.size.0 >= DOCK_BREAKPOINT {
-                state.dock_wanted = !state.dock_wanted;
+            state.right_dock = if scx.size.0 >= DOCK_BREAKPOINT {
+                match state.right_dock {
+                    DockWish::Hidden => DockWish::Shown,
+                    DockWish::Shown | DockWish::Forced => DockWish::Hidden,
+                }
             } else if scx.width_policy.right_dock_shown {
-                state.dock_forced = false;
+                DockWish::Shown
             } else {
                 // Narrow: the toggle shows the collapsed dock anyway, and
                 // the thread shrinks toward its minimum.
-                state.dock_wanted = true;
-                state.dock_forced = true;
-            }
+                DockWish::Forced
+            };
         }
         CommandId::NextThread | CommandId::PreviousThread => {
             let step = if id == CommandId::NextThread { 1 } else { -1 };
