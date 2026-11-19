@@ -81,57 +81,102 @@ enum Step {
     Cancelled(CancelReason),
 }
 
-/// What a drag's signals add up to, apart from the protocol.
-#[derive(Debug, Default)]
-#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
-struct Machine {
-    can_follow: bool,
-    following: bool,
-    /// The window the drag is over and the pointer's last point in it.
-    entered: Option<(Surface, (f32, f32))>,
+/// Whether a window follows the pointer through `xdg_toplevel_drag_v1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Follow {
+    /// The compositor cannot move a window with the drag.
+    Unsupported,
+    /// A window may be attached.
+    Available,
+    /// A window is attached and follows the pointer.
+    Following,
+}
+
+/// Where the compositor last said the drag is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Whereabouts {
+    /// Over none of our windows yet.
+    Unentered,
+    /// Over this window, at the pointer's last point in it.
+    Over { surface: Surface, point: (f32, f32) },
     /// The drag left our windows and has not come back.
-    away: bool,
-    /// The user released the drag (`dnd_drop_performed`).
-    performed: bool,
-    /// The compositor ended the drag.
-    over: bool,
+    Away,
+}
+
+/// How far the drag has come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Dragging,
+    /// The user released the drag (`dnd_drop_performed`) and the
+    /// compositor has yet to end it.
+    Performed,
+    /// The compositor or the app ended the drag.
+    Ended,
+}
+
+/// What a drag's signals add up to, apart from the protocol.
+#[derive(Debug)]
+struct Machine {
+    follow: Follow,
+    whereabouts: Whereabouts,
+    phase: Phase,
 }
 
 impl Machine {
     fn new(can_follow: bool) -> Self {
         Self {
-            can_follow,
-            ..Self::default()
+            follow: if can_follow {
+                Follow::Available
+            } else {
+                Follow::Unsupported
+            },
+            whereabouts: Whereabouts::Unentered,
+            phase: Phase::Dragging,
         }
     }
 
     /// Whether a window may be attached now.
     fn may_follow(&self) -> Result<(), FollowError> {
-        if self.over {
-            Err(FollowError::Ended)
-        } else if !self.can_follow {
-            Err(FollowError::Unsupported)
-        } else if self.following {
-            Err(FollowError::Following)
-        } else {
-            Ok(())
+        match (self.phase, self.follow) {
+            (Phase::Ended, _) => Err(FollowError::Ended),
+            (_, Follow::Unsupported) => Err(FollowError::Unsupported),
+            (_, Follow::Following) => Err(FollowError::Following),
+            (_, Follow::Available) => Ok(()),
         }
     }
 
+    /// A window was attached, after [`Self::may_follow`] allowed it.
+    fn attached(&mut self) {
+        self.follow = Follow::Following;
+    }
+
+    /// The app gave the drag up. True when the compositor still runs it
+    /// and must be told.
+    fn end(&mut self) -> bool {
+        let running = self.phase != Phase::Ended;
+        self.phase = Phase::Ended;
+        running
+    }
+
     fn signal(&mut self, signal: DockSignal) -> Option<Step> {
-        if self.over {
+        if self.phase == Phase::Ended {
             return None;
         }
         let point = |x: f64, y: f64| (x as f32, y as f32);
         match signal {
             DockSignal::Enter { surface, x, y } => {
                 let point = point(x, y);
-                self.entered = Some((surface, point));
-                self.away = false;
+                self.whereabouts = Whereabouts::Over { surface, point };
                 Some(Step::Moved(Spot::Over { surface, point }))
             }
             DockSignal::Motion { x, y } => {
-                let (surface, last) = self.entered.as_mut()?;
+                let Whereabouts::Over {
+                    surface,
+                    point: last,
+                } = &mut self.whereabouts
+                else {
+                    return None;
+                };
                 *last = point(x, y);
                 Some(Step::Moved(Spot::Over {
                     surface: *surface,
@@ -139,34 +184,31 @@ impl Machine {
                 }))
             }
             DockSignal::Leave => {
-                self.entered = None;
-                self.away = true;
+                self.whereabouts = Whereabouts::Away;
                 Some(Step::Moved(Spot::Unknown))
             }
             DockSignal::Drop => {
-                self.over = true;
-                let spot = self
-                    .entered
-                    .take()
-                    .map_or(Spot::Unknown, |(surface, point)| Spot::Over {
-                        surface,
-                        point,
-                    });
+                self.phase = Phase::Ended;
+                let spot = match self.whereabouts {
+                    Whereabouts::Over { surface, point } => Spot::Over { surface, point },
+                    Whereabouts::Unentered | Whereabouts::Away => Spot::Unknown,
+                };
                 Some(Step::Released(spot))
             }
             DockSignal::DropPerformed => {
-                self.performed = true;
+                self.phase = Phase::Performed;
                 None
             }
             DockSignal::Taken => {
-                self.over = true;
+                self.phase = Phase::Ended;
                 Some(Step::Released(Spot::Outside))
             }
             DockSignal::Cancelled | DockSignal::Finished => {
-                self.over = true;
                 // A following window can only be put back on a cancel the
                 // compositor says is one.
-                let released = self.performed || (self.away && !self.following);
+                let released = self.phase == Phase::Performed
+                    || (self.whereabouts == Whereabouts::Away && self.follow != Follow::Following);
+                self.phase = Phase::Ended;
                 Some(if released {
                     Step::Released(Spot::Outside)
                 } else {
@@ -210,7 +252,7 @@ impl WaylandDrag {
     }
 
     pub(super) fn can_follow(&self) -> bool {
-        self.machine.can_follow
+        self.machine.follow != Follow::Unsupported
     }
 
     pub(super) fn follow(
@@ -231,7 +273,7 @@ impl WaylandDrag {
             tracing::warn!("dock drag: could not attach the window: {error}");
             return Err(FollowError::NotOpen);
         }
-        self.machine.following = true;
+        self.machine.attached();
         Ok(())
     }
 
@@ -249,8 +291,7 @@ impl WaylandDrag {
     /// The app is done with the drag: give it up unless the compositor
     /// already ended it.
     pub(super) fn end(&mut self) {
-        if !self.machine.over {
-            self.machine.over = true;
+        if self.machine.end() {
             drag_out::end_dock(self.sequence);
         }
     }
@@ -291,6 +332,24 @@ mod tests {
     const MAIN: Surface = 0xa000;
     const TOOLS: Surface = 0xb000;
 
+    fn enter(surface: Surface) -> DockSignal {
+        DockSignal::Enter {
+            surface,
+            x: 10.0,
+            y: 20.0,
+        }
+    }
+
+    /// A drag a compositor that can move windows runs, with one following
+    /// it if `following`.
+    fn machine(following: bool) -> Machine {
+        let mut machine = Machine::new(true);
+        if following {
+            machine.attached();
+        }
+        machine
+    }
+
     // A drag must end exactly once, the way the compositor's signals say:
     // dropped on a window of ours at its last point, released outside when
     // dropped elsewhere (including Hyprland's way, with no
@@ -298,11 +357,6 @@ mod tests {
     #[test]
     fn compositor_signals_end_the_drag_once_as_released_or_cancelled() {
         use DockSignal::*;
-        let enter = |surface| Enter {
-            surface,
-            x: 10.0,
-            y: 20.0,
-        };
         let cases: [(&str, bool, &[DockSignal], &str); 11] = [
             (
                 "dropped on a window",
@@ -379,8 +433,7 @@ mod tests {
             ),
         ];
         for (name, following, signals, ending) in cases {
-            let mut machine = Machine::new(true);
-            machine.following = following;
+            let mut machine = machine(following);
             let ends: Vec<String> = signals
                 .iter()
                 .filter_map(|&signal| machine.signal(signal))
@@ -415,10 +468,93 @@ mod tests {
         ];
         for (name, can_follow, following, over, expected) in cases {
             let mut machine = Machine::new(can_follow);
-            machine.following = following;
-            machine.over = over;
+            if following {
+                machine.attached();
+            }
+            if over {
+                machine.end();
+            }
             assert_eq!(machine.may_follow(), expected, "{name}");
         }
+    }
+
+    // Moves name the window the compositor last entered and the pointer's
+    // point in it; motion while over none of our windows is no location.
+    #[test]
+    fn moves_follow_the_window_the_compositor_last_entered() {
+        use DockSignal::*;
+        let mut machine = machine(false);
+        let signals = [
+            Motion { x: 1.0, y: 1.0 },
+            enter(MAIN),
+            Motion { x: 30.0, y: 5.0 },
+            Leave,
+            Motion { x: 2.0, y: 2.0 },
+            enter(TOOLS),
+        ];
+        let moves: Vec<String> = signals
+            .into_iter()
+            .filter_map(|signal| machine.signal(signal))
+            .map(|step| format!("{step:?}"))
+            .collect();
+        assert_eq!(
+            moves,
+            [
+                "Moved(Over { surface: 40960, point: (10.0, 20.0) })",
+                "Moved(Over { surface: 40960, point: (30.0, 5.0) })",
+                "Moved(Unknown)",
+                "Moved(Over { surface: 45056, point: (10.0, 20.0) })",
+            ]
+        );
+    }
+
+    // The app's end reaches the compositor once, and only while it still
+    // runs the drag.
+    #[test]
+    fn the_app_gives_up_only_a_drag_the_compositor_still_runs() {
+        use DockSignal::*;
+        let cases: [(&str, &[DockSignal], [bool; 2]); 4] = [
+            ("over a window", &[enter(MAIN)], [true, false]),
+            (
+                "released, not yet ended",
+                &[enter(MAIN), Leave, DropPerformed],
+                [true, false],
+            ),
+            ("dropped", &[enter(MAIN), Drop], [false, false]),
+            ("cancelled", &[enter(MAIN), Cancelled], [false, false]),
+        ];
+        for (name, signals, ends) in cases {
+            let mut machine = machine(false);
+            for &signal in signals {
+                machine.signal(signal);
+            }
+            assert_eq!([machine.end(), machine.end()], ends, "{name}");
+        }
+    }
+
+    // Signals still queued when the app gives the drag up neither move nor
+    // end it again.
+    #[test]
+    fn nothing_after_the_app_gives_the_drag_up_counts() {
+        use DockSignal::*;
+        let mut machine = machine(true);
+        machine.signal(enter(MAIN));
+        machine.end();
+        let signals = [
+            enter(TOOLS),
+            Motion { x: 1.0, y: 1.0 },
+            Leave,
+            DropPerformed,
+            Drop,
+            Taken,
+            Cancelled,
+            Finished,
+        ];
+        let steps: Vec<Step> = signals
+            .into_iter()
+            .filter_map(|signal| machine.signal(signal))
+            .collect();
+        assert_eq!(steps, []);
     }
 
     // The thread accepts an offer only if it carries the running drag's
