@@ -35,6 +35,7 @@ pub(super) enum Composition {
     Orphaned,
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub(crate) struct WindowUiState {
     /// Names the accessibility tree's window node; the adapter's name when
     /// unset.

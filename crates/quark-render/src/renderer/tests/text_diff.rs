@@ -330,6 +330,7 @@ fn list(shaper: &mut Shaper, offset: f32) -> Scene {
     scene
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 fn cases(other: &mut TextSystem) -> Vec<Case> {
     let mut cases = Vec::new();
     let mut text = test_text();

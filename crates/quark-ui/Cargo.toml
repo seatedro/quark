@@ -67,6 +67,5 @@ quark-render = { workspace = true, features = ["headless-render"] }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 accesskit_atspi_common = "0.19"
 
-[lints.rust]
-# `cfg(kani)` gates the bounded model checking harnesses.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+[lints]
+workspace = true

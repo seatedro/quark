@@ -930,6 +930,7 @@ impl<S: ?Sized + 'static> CommandPalette<S> {
 
     /// The palette over a `window`-sized scrim, or `None` while closed.
     /// `focused` is whether [`PALETTE_INPUT`] has focus, for the caret.
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     pub fn render(
         &self,
         window: (f32, f32),

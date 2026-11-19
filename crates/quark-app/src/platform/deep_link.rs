@@ -222,8 +222,10 @@ mod macos {
         impl GetUrlHandler {
             #[unsafe(method(handleGetURLEvent:withReplyEvent:))]
             fn handle(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
-                // Through msg_send: objc2-foundation gates this method behind
-                // its CoreServices feature, a whole extra crate for one call.
+                // SAFETY: paramDescriptorForKeyword: takes an AEKeyword and
+                // returns a descriptor or nil. Through msg_send:
+                // objc2-foundation gates this method behind its CoreServices
+                // feature, a whole extra crate for one call.
                 let param: Option<Retained<NSAppleEventDescriptor>> =
                     unsafe { msg_send![event, paramDescriptorForKeyword: DIRECT_OBJECT] };
                 let url = param.and_then(|param| param.stringValue());
@@ -240,6 +242,7 @@ mod macos {
     /// between. Replaces the previous handler.
     pub(crate) fn listen(events: &EventSink) {
         let handler = GetUrlHandler::alloc().set_ivars(events.clone());
+        // SAFETY: NSObject's init, once, on a fresh allocation.
         let handler: Retained<GetUrlHandler> = unsafe { msg_send![super(handler), init] };
         let manager = NSAppleEventManager::sharedAppleEventManager();
         // SAFETY: the selector names the method above, with the signature

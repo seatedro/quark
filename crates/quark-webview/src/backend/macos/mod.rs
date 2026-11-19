@@ -5,6 +5,11 @@
 //! winit already drives; WebKit's callbacks arrive there and only update
 //! the sink, so the backend never needs servicing.
 
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "AppKit and WebKit calls not yet documented block by block"
+)]
+
 mod eval;
 mod host;
 mod navigation;

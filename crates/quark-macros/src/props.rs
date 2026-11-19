@@ -36,6 +36,7 @@ enum Kind {
     Optional(Type),
 }
 
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 pub(crate) fn derive(input: DeriveInput) -> Result<TokenStream2> {
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(

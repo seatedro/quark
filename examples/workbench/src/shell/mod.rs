@@ -27,6 +27,7 @@ pub const DOCK_BREAKPOINT: f32 = 1200.0;
 /// Narrower than this, the sidebar becomes an overlay.
 pub const SIDEBAR_BREAKPOINT: f32 = 1040.0;
 
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub struct State {
     pub sidebar: sidebar::State,
     /// The user wants the sidebar (Mod+B toggles).

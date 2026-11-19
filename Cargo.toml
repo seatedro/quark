@@ -75,6 +75,25 @@ unicode-segmentation = "1.12"
 wgpu = { version = "28.0.0", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan", "metal", "dx12"] }
 winit = "0.30"
 
+[workspace.lints.rust]
+# `cfg(kani)` gates the bounded model checking harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+
+# Every quark crate opts in with `[lints] workspace = true`; vendored crates
+# keep their upstream lints. CI's clippy runs with `-D warnings`.
+[workspace.lints.clippy]
+# A struct or signature full of flags is usually a state machine left
+# implicit: name its states with an enum instead.
+struct_excessive_bools = "warn"
+fn_params_excessive_bools = "warn"
+# Split long functions by what they do; clippy.toml sets the limit.
+too_many_lines = "warn"
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "deny"
+todo = "warn"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+
 [profile.dev]
 opt-level = 1
 debug = 1

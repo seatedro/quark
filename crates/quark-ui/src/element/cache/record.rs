@@ -311,6 +311,7 @@ impl Recording {
 
     /// Copy the subtree's paint output into its row and decide whether the
     /// row may replay. `memo` replaces the row's measure memo when given.
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     pub(super) fn commit(
         mut self,
         scene: &Scene,

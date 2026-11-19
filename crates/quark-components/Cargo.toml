@@ -25,6 +25,5 @@ serde_json = "1.0"
 # `view_equivalence` counts what the macro's lowering allocates.
 quark-ui = { workspace = true, features = ["test-alloc"] }
 
-[lints.rust]
-# `cfg(kani)` gates the bounded model checking harnesses.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+[lints]
+workspace = true

@@ -977,6 +977,7 @@ fn same_token(input: &str, a: &Tok, output: &str, b: &Tok) -> bool {
 /// rustfmt inserted is dropped and one it removed is put back; any other
 /// difference fails that wrapper's fragment only, and alignment resumes at
 /// the next wrapper function.
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 fn align_batch(
     input: &str,
     spans: &[WrapSpan],

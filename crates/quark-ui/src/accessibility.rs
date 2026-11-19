@@ -428,6 +428,10 @@ pub enum AccessibilityAction {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct AccessibilityNode {
     id: NodeId,
     role: Role,
@@ -857,6 +861,10 @@ impl AccessibilityNode {
 /// Accessibility state a [`Div`] carries beyond its role, label, and the
 /// common flags it stores itself.
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub(crate) struct AccessibilityExtra {
     mixed: bool,
     invalid: bool,

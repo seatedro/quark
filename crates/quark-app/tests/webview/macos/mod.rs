@@ -691,6 +691,8 @@ mod native {
     pub fn replace_pasteboard(text: &str) -> Option<String> {
         let _ = MainThreadMarker::new();
         let pasteboard = NSPasteboard::generalPasteboard();
+        // SAFETY: an AppKit constant, declared with its type and never
+        // written.
         let kind = unsafe { NSPasteboardTypeString };
         let saved = pasteboard.stringForType(kind).map(|text| text.to_string());
         pasteboard.clearContents();
@@ -702,6 +704,7 @@ mod native {
         let pasteboard = NSPasteboard::generalPasteboard();
         pasteboard.clearContents();
         if let Some(text) = saved {
+            // SAFETY: as in `replace_pasteboard`.
             pasteboard.setString_forType(&NSString::from_str(&text), unsafe {
                 NSPasteboardTypeString
             });

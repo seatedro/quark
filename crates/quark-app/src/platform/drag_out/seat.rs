@@ -278,6 +278,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn a_drag_starts_from_the_one_primary_press_held_on_its_window() {
         use Step::*;
         const RIGHT: u32 = 0x111;

@@ -281,6 +281,10 @@ macro_rules! sized {
 impl Terminal {
     /// A terminal of `cols` by `rows` cells (each at least 1) with Ghostty's
     /// default scrollback.
+    #[expect(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one SAFETY comment covers each run of FFI calls"
+    )]
     pub fn new(cols: u16, rows: u16) -> Self {
         let (cols, rows) = (cols.max(1), rows.max(1));
         // SAFETY: each constructor gets a valid out pointer and the default
@@ -689,6 +693,10 @@ impl Terminal {
     ///
     /// The render state must be updated, and `grid` must have been read
     /// at the same width and default colors.
+    #[expect(
+        clippy::undocumented_unsafe_blocks,
+        reason = "one SAFETY comment covers each run of FFI calls"
+    )]
     unsafe fn redraw_rows(&mut self, grid: &mut Grid, rows: usize, colors: Colors) {
         let mut old = std::mem::take(&mut self.old_rows);
         std::mem::swap(&mut old, &mut grid.rows);

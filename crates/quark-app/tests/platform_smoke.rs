@@ -280,6 +280,8 @@ mod smoke {
                 ]
             };
             let Some(event) = event else { return false };
+            // SAFETY: performKeyEquivalent: takes an NSEvent and returns a
+            // BOOL.
             unsafe { msg_send![&main_menu(), performKeyEquivalent: &*event] }
         }
 

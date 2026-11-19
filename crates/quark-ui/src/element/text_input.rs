@@ -32,6 +32,10 @@ const BULLET: &str = "\u{2022}";
 // TextInput — text field with cursor, selection, and editing support
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct TextInput {
     label: String,
     value: Arc<str>,
@@ -324,6 +328,7 @@ impl Element for TextInput {
         (!flags.is_empty()).then(|| cx.insert_hit(bounds, flags, CursorHint::Text))
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn paint(
         &mut self,
         bounds: Bounds,

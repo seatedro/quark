@@ -55,3 +55,6 @@ headless-render = ["dep:image"]
 # The experimental DirectWrite rasterizer on Windows; swash stays the
 # default and the fallback.
 text-raster-directwrite = ["dep:windows", "dep:windows-core"]
+
+[lints]
+workspace = true

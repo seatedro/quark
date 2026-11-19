@@ -8,6 +8,10 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// A flexbox container. The core building block.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct Div {
     base_style: ElementStyle,
     hover_style: Option<StyleOverride>,
@@ -1161,6 +1165,7 @@ impl Element for Div {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn paint(
         &mut self,
         bounds: Bounds,

@@ -37,3 +37,6 @@ profile-puffin = ["quark-app/profile-puffin"]
 profile-tracy = ["quark-app/profile-tracy"]
 # Pixel readback in tests through a headless GPU device.
 headless-render = ["quark-app/headless-render"]
+
+[lints]
+workspace = true

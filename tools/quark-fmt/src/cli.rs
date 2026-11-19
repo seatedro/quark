@@ -58,6 +58,10 @@ pub enum Entry {
 }
 
 #[derive(Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 struct Options {
     check: bool,
     view_only: bool,

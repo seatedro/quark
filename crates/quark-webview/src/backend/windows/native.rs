@@ -878,6 +878,7 @@ fn source(webview: &ICoreWebView2) -> String {
 /// Register every event handler. Each handler holds the view weakly and
 /// releases its `RefCell` borrow before calling back into WebView2, which
 /// may raise further events synchronously.
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 unsafe fn install_handlers(
     view: &Rc<View>,
     webview: &ICoreWebView2,

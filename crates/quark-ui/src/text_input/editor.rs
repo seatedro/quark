@@ -115,6 +115,7 @@ pub struct CursorState {
 /// layout is rebuilt by [`Editor::flush`]; call it once per frame before
 /// building the element.
 #[derive(Clone)]
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub struct Editor {
     mode: EditorMode,
     buffer: TextBuffer,

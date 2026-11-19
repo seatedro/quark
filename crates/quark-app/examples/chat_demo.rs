@@ -355,6 +355,7 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| v != "0")
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 struct Demo {
     chat: MarkdownDocument,
     rng: Rng,

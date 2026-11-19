@@ -458,6 +458,7 @@ impl Element for TextElement {
     ) {
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn paint(
         &mut self,
         bounds: Bounds,

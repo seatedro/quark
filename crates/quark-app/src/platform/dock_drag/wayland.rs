@@ -83,6 +83,7 @@ enum Step {
 
 /// What a drag's signals add up to, apart from the protocol.
 #[derive(Debug, Default)]
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 struct Machine {
     can_follow: bool,
     following: bool,

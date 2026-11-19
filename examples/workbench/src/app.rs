@@ -439,6 +439,7 @@ impl UiApp for Workbench {
         dock::init(&mut self.dock, cx);
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn view(&mut self, vcx: &mut ViewContext) -> AnyElement {
         let window = vcx.window_handle();
         let size = vcx.frame.size();

@@ -142,6 +142,10 @@ pub(crate) fn paint_decorations(
 /// every span's `text` is the plain string selection and copy operate on, so the
 /// markup markers (backticks, asterisks, link URLs) must already be stripped.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct StyledSpan {
     pub text: String,
     pub font_kind: FontKind,

@@ -1109,6 +1109,7 @@ mod tests {
     // accent at 7:1, placeholders at 4.5:1, and borders, focus rings, and
     // accent marks at 3:1.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn high_contrast_pairs_meet_their_targets() {
         const SURFACES: &[&str] = &[
             "background",

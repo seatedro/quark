@@ -99,7 +99,7 @@ impl Fontconfig {
             let ptr = unsafe { dlsym(lib, name.as_ptr()) };
             (!ptr.is_null()).then_some(ptr)
         };
-        // SAFETY (each transmute): a non-null function pointer of the
+        // SAFETY: each transmute is of a non-null function pointer to the
         // symbol fontconfig.h declares with this signature.
         unsafe {
             Some(Self {
