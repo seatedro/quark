@@ -41,6 +41,26 @@ impl FrameScale {
     }
 }
 
+/// Height of the view an [`super::Editor`]'s element last painted. The
+/// element writes it during paint and the editor reads it on the next
+/// flush, so it shapes at least what is painted even when the app sized it
+/// smaller (or not at all). Clones share the value.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FrameViewport(Arc<AtomicU32>);
+
+impl FrameViewport {
+    /// 0 until a frame has painted.
+    pub(crate) fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set(&self, height: f32) {
+        if height.is_finite() && height >= 0.0 {
+            self.0.store(height.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
+
 /// The smallest change to `scroll` that keeps a caret of `caret_width` at
 /// `caret_x` inside a `view_width` window over `content_width` of text.
 pub fn reveal_offset(

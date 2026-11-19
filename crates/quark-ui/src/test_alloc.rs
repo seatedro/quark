@@ -11,14 +11,18 @@ pub struct Counting;
 
 thread_local! {
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+    /// Bytes asked for by those allocations (a reallocation counts its new
+    /// size).
+    static BYTES: Cell<u64> = const { Cell::new(0) };
     /// Set while `profile` runs; cleared inside the hook so the hook's own
     /// allocations are not attributed.
     static PROFILING: Cell<bool> = const { Cell::new(false) };
     static SITES: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
 }
 
-fn record() {
+fn record(size: usize) {
     let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
+    let _ = BYTES.try_with(|n| n.set(n.get() + size as u64));
     if PROFILING.try_with(|p| p.replace(false)) != Ok(true) {
         return;
     }
@@ -48,13 +52,13 @@ fn call_site(trace: &str) -> String {
 // thread locals, and the profiling hook disables itself while it runs.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record();
+        record(layout.size());
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record();
+        record(layout.size());
         // SAFETY: as above.
         unsafe { System.alloc_zeroed(layout) }
     }
@@ -65,7 +69,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        record();
+        record(new_size);
         // SAFETY: as above.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -81,6 +85,14 @@ pub fn count<R>(f: impl FnOnce() -> R) -> (R, u64) {
     let before = allocations();
     let result = f();
     (result, allocations() - before)
+}
+
+/// Bytes `f` asks this thread's allocator for (allocations and
+/// reallocations, never less for what it frees).
+pub fn bytes<R>(f: impl FnOnce() -> R) -> (R, u64) {
+    let before = BYTES.with(Cell::get);
+    let result = f();
+    (result, BYTES.with(Cell::get) - before)
 }
 
 /// Run `f` and return its allocations by call site, most first. Slow:

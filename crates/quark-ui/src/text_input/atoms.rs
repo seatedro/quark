@@ -10,8 +10,7 @@
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use quark_text::offset;
-
+use super::doc_text::TextBounds;
 use super::styles::{self, RichExport, StyleIntegrityError, StyleSpan};
 
 /// The app's key for an atom's payload: `kind` says which of its tables
@@ -96,8 +95,8 @@ impl RichText {
     /// grapheme boundaries of `text`, and that the style runs are
     /// canonical.
     pub fn verify_integrity(&self) -> Result<(), AtomIntegrityError> {
-        verify(&self.text, &self.atoms)?;
-        styles::verify(&self.text, &self.styles).map_err(AtomIntegrityError::Style)
+        verify(self.text.as_str(), &self.atoms)?;
+        styles::verify(self.text.as_str(), &self.styles).map_err(AtomIntegrityError::Style)
     }
 }
 
@@ -127,15 +126,17 @@ impl std::fmt::Display for AtomIntegrityError {
 
 impl std::error::Error for AtomIntegrityError {}
 
-fn verify(text: &str, atoms: &[InlineAtom]) -> Result<(), AtomIntegrityError> {
+fn verify<T: TextBounds + ?Sized>(
+    text: &T,
+    atoms: &[InlineAtom],
+) -> Result<(), AtomIntegrityError> {
     let mut prev_end = 0;
     for (index, atom) in atoms.iter().enumerate() {
         let Range { start, end } = atom.range;
-        if start >= end || end > text.len() {
+        if start >= end || end > text.byte_len() {
             return Err(AtomIntegrityError::OutOfBounds { index });
         }
-        let on_boundary = |o: usize| offset::TextOffset::snap(text, o) == o;
-        if !on_boundary(start) || !on_boundary(end) {
+        if !text.is_grapheme_boundary(start) || !text.is_grapheme_boundary(end) {
             return Err(AtomIntegrityError::OffBoundary { index });
         }
         if index > 0 && start < prev_end {
@@ -164,7 +165,10 @@ impl AtomList {
         self.0.extend_from_slice(atoms);
     }
 
-    pub(super) fn verify_integrity(&self, text: &str) -> Result<(), AtomIntegrityError> {
+    pub(super) fn verify_integrity<T: TextBounds + ?Sized>(
+        &self,
+        text: &T,
+    ) -> Result<(), AtomIntegrityError> {
         verify(text, &self.0)
     }
 
@@ -265,6 +269,7 @@ impl RichClipboard {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use quark_text::offset;
 
     use super::super::{Editor, InputHooks, Insertion, TextEditCommand};
     use super::*;

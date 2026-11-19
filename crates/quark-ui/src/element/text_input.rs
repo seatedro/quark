@@ -207,21 +207,33 @@ pub enum TextHitContent {
         /// The real value behind the bullets of a masked field.
         masked: Option<Arc<str>>,
     },
-    /// An editor. `layout` is its wrapped text with its origin `scroll_y`
-    /// above the text area.
+    /// An editor, its content origin `scroll_y` above the text area:
+    /// either the lines its editor shaped around the view (`window`), or
+    /// one `layout` of all its text.
     Multiline {
         layout: Option<Arc<TextLayout>>,
+        window: Option<crate::text_input::EditorWindow>,
         scroll_y: f32,
     },
 }
 
 impl TextInputHitArea {
-    /// The painted layout pointer hits go through: `None` for placeholders
-    /// and compositions.
+    /// The painted layout pointer hits go through: `None` for placeholders,
+    /// compositions, and editors painted from their shaped lines (see
+    /// [`Self::window`]).
     pub fn layout(&self) -> Option<&Arc<TextLayout>> {
         match &self.content {
             TextHitContent::SingleLine { layout, .. }
             | TextHitContent::Multiline { layout, .. } => layout.as_ref(),
+        }
+    }
+
+    /// The lines an editor shaped around its view, which pointer hits go
+    /// through: `None` for placeholders, compositions, and single lines.
+    pub fn window(&self) -> Option<&crate::text_input::EditorWindow> {
+        match &self.content {
+            TextHitContent::Multiline { window, .. } => window.as_ref(),
+            TextHitContent::SingleLine { .. } => None,
         }
     }
 
@@ -248,6 +260,11 @@ impl TextInputHitArea {
     /// past the edge extends into it and the next frame scrolls it in.
     /// `None` when there is no layout, or the field is flattened.
     pub fn offset_at_point(&self, x: f32, y: f32) -> Option<TextOffset> {
+        if let Some(window) = self.window() {
+            let (x, y) = self.to_layout(x, y)?;
+            let (ox, oy) = self.origin();
+            return window.hit(x - ox, y - oy);
+        }
         let layout = self.layout()?;
         let (x, y) = self.to_layout(x, y)?;
         let (ox, oy) = self.origin();

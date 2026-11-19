@@ -230,15 +230,13 @@ impl TextDemo {
 
     /// Corrections for the misspelled word under a right click.
     fn open_spelling_menu(&mut self, (x, y): (f32, f32)) -> bool {
-        let Some(layout) = self.editor.layout() else {
+        let Some(at) = self.editor.offset_at(
+            x - PAD - EDITOR_INSET,
+            y - EDITOR_Y - EDITOR_INSET + self.editor.scroll_y,
+        ) else {
             return false;
         };
-        let at = layout
-            .hit(
-                x - PAD - EDITOR_INSET,
-                y - EDITOR_Y - EDITOR_INSET + self.editor.scroll_y,
-            )
-            .get();
+        let at = at.get();
         let Some(issue) = self.editor.spelling_at(at) else {
             return false;
         };

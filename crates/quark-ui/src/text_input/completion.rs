@@ -121,7 +121,10 @@ impl Completion {
             return self.close();
         }
         self.closed_at = None;
-        let query = trigger.query(editor.text());
+        // The query alone, not the whole text: the document may be long.
+        let start = trigger.range.start.get() + trigger.ch.len_utf8();
+        let query = editor.slice(start..trigger.range.end.get());
+        let query = query.as_ref();
         if let Some(active) = &self.active
             && active.trigger == trigger
             && active.query == query

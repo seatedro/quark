@@ -51,7 +51,7 @@ pub use layout::{
     Caret, DEFAULT_LINE_HEIGHT_FACTOR, Glyph, GlyphColumns, GlyphRun, IntegrityError, LineInfo,
     TextError, TextLayout, TextParams, TextQuery, TextSpan, TextStyle,
 };
-pub use offset::{TextOffset, ToTextOffset};
+pub use offset::{SegmentedText, TextOffset, ToTextOffset};
 pub use row::{RowHeights, RowMeasure};
 pub use source::TextSource;
 pub use system::{TextSystem, TextSystemRecipe};

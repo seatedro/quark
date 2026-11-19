@@ -511,10 +511,23 @@ mod tests {
             }
             harness.paint();
             let area = harness.area().clone();
-            let line = area.layout().and_then(|l| l.line(1)).expect("second line");
+            // Every painted visual line: its top, height, and first byte.
+            let visual: Vec<(f32, f32, usize)> = area
+                .window()
+                .expect("editor lines")
+                .lines()
+                .iter()
+                .flat_map(|l| {
+                    l.layout
+                        .lines()
+                        .map(|v| (l.top + v.top, v.height, l.start + v.byte_range.start))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let (line_top, height, start) = visual[1];
             let (_, top) = area.origin();
-            harness.press(area.text_rect.x + 1.0, top + line.top + line.height * 0.5);
-            let start = TextOffset::snap(text, line.byte_range.start);
+            harness.press(area.text_rect.x + 1.0, top + line_top + height * 0.5);
+            let start = TextOffset::snap(text, start);
             assert_eq!(harness.model.selection(), (start, start), "{name}");
         }
     }

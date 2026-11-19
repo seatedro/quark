@@ -17,6 +17,7 @@ use std::sync::Arc;
 use quark_text::offset;
 
 use super::atoms::InlineAtom;
+use super::doc_text::TextBounds;
 
 /// A set of inline style flags.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -149,11 +150,14 @@ impl std::fmt::Display for StyleIntegrityError {
 
 impl std::error::Error for StyleIntegrityError {}
 
-pub(super) fn verify(text: &str, spans: &[StyleSpan]) -> Result<(), StyleIntegrityError> {
+pub(super) fn verify<T: TextBounds + ?Sized>(
+    text: &T,
+    spans: &[StyleSpan],
+) -> Result<(), StyleIntegrityError> {
     let mut prev: Option<&StyleSpan> = None;
     for (index, span) in spans.iter().enumerate() {
         let Range { start, end } = span.range;
-        if start >= end || end > text.len() {
+        if start >= end || end > text.byte_len() {
             return Err(StyleIntegrityError::OutOfBounds { index });
         }
         if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
@@ -211,7 +215,10 @@ impl StyleList {
         canonicalize(&mut self.0);
     }
 
-    pub(super) fn verify_integrity(&self, text: &str) -> Result<(), StyleIntegrityError> {
+    pub(super) fn verify_integrity<T: TextBounds + ?Sized>(
+        &self,
+        text: &T,
+    ) -> Result<(), StyleIntegrityError> {
         verify(text, &self.0)
     }
 

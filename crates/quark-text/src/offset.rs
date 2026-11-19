@@ -71,6 +71,25 @@ impl TextOffset {
     pub fn within(self, text: &str) -> Self {
         Self::snap(text, self.get())
     }
+
+    /// The grapheme boundary at or before `byte` of `text` held in pieces
+    /// (a rope), clamped to it. The text finds its own boundaries, so an
+    /// offset made here sits on one as surely as [`Self::snap`]'s.
+    pub fn snap_in(text: &(impl SegmentedText + ?Sized), byte: usize) -> Self {
+        let byte = byte.min(text.byte_len()).min(u32::MAX as usize);
+        Self(text.floor_grapheme(byte).min(byte) as u32)
+    }
+}
+
+/// Text that is not one contiguous `str` (a rope) and finds its own
+/// grapheme boundaries, so [`TextOffset::snap_in`] can place offsets on it.
+pub trait SegmentedText {
+    /// Length in bytes.
+    fn byte_len(&self) -> usize;
+
+    /// The grapheme boundary at or before `byte`, which is at most
+    /// [`Self::byte_len`].
+    fn floor_grapheme(&self, byte: usize) -> usize;
 }
 
 impl std::fmt::Display for TextOffset {
