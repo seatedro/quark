@@ -58,15 +58,41 @@ impl GpuContext {
     }
 
     /// Context with no window, rendering into sRGB offscreen targets.
-    #[cfg(any(test, feature = "headless-render"))]
+    #[cfg(all(not(test), feature = "headless-render"))]
     pub fn headless() -> Result<Self, RenderError> {
         Self::headless_with_limits(wgpu::Limits::default())
+    }
+
+    /// Context with no window, rendering into sRGB offscreen targets.
+    ///
+    /// Unit tests share one default context across threads: creating and
+    /// tearing down dozens of independent Vulkan/lavapipe devices in parallel
+    /// both recompiles every pipeline per test and trips Mesa lavapipe's
+    /// concurrent device teardown SIGSEGV on Linux CI runners.
+    #[cfg(test)]
+    pub fn headless() -> Result<Self, RenderError> {
+        static SHARED: Mutex<Option<GpuContext>> = Mutex::new(None);
+        let mut slot = SHARED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(gpu) = slot.as_ref() {
+            return Ok(gpu.clone());
+        }
+        let gpu = Self::headless_with_limits(wgpu::Limits::default())?;
+        *slot = Some(gpu.clone());
+        Ok(gpu)
     }
 
     /// [`Self::headless`] on a device capped at `limits`. Tests shrink the
     /// texture size limit to fill the glyph atlas with a few glyphs.
     #[cfg(any(test, feature = "headless-render"))]
     pub(super) fn headless_with_limits(limits: wgpu::Limits) -> Result<Self, RenderError> {
+        #[cfg(test)]
+        static INIT: Mutex<()> = Mutex::new(());
+        #[cfg(test)]
+        let _init = INIT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         pollster::block_on(async {
             let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
             let adapter = request_adapter(&instance, None).await?;
