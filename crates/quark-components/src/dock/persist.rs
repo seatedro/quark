@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::workspace::FloatingHost;
-use super::{DockRegion, DockSnapshot, DockState, HostId, PanelId};
+use super::{DockRegion, DockSnapshot, DockState, Gesture, HostId, PanelId};
 use crate::pane_tree::{PaneId, PaneNode, TabGroup};
 
 /// The [`WorkspaceSnapshot::version`] this build writes.
@@ -164,7 +164,6 @@ impl DockState {
         }
         self.floating.clear();
         self.reservations.clear();
-        self.live.clear();
         for saved in &snapshot.floating {
             if saved.host == HostId::MAIN || self.floating_host(saved.host).is_some() {
                 continue;
@@ -207,9 +206,7 @@ impl DockState {
             self.returns.insert(r.panel, (r.region, pane, r.index));
         }
         self.confined.retain(|p| seen.contains(p));
-        self.tab_drag = None;
-        self.drag_hover = None;
-        self.divider_drag = None;
+        self.gesture = Gesture::Idle;
         for region in DockRegion::ALL {
             if self.panels(region).is_empty() {
                 self.set_hidden(region, true);
