@@ -197,7 +197,35 @@ proptest! {
         for (now, value, velocity) in &runs[0] {
             for (hz, run) in rates.iter().zip(&runs).skip(1) {
                 let at = run.iter().find(|s| s.0 == *now);
-                prop_assert_eq!(at, Some(&(*now, *value, *velocity)), "{} Hz at {} ms", hz, now);
+                if cfg!(miri) {
+                    // Miri intentionally perturbs transcendental f32 ops by a
+                    // few ULPs per call; compare within a tight relative bound.
+                    let Some((got_now, got_v, got_vel)) = at else {
+                        prop_assert!(false, "missing sample for {} Hz at {} ms", hz, now);
+                        unreachable!();
+                    };
+                    prop_assert_eq!(got_now, now);
+                    let near_opt = |a: Option<f32>, b: Option<f32>| match (a, b) {
+                        (Some(a), Some(b)) => {
+                            let tol = 1e-5 * a.abs().max(b.abs()).max(1.0);
+                            (a - b).abs() <= tol
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    prop_assert!(
+                        near_opt(*got_v, *value) && near_opt(*got_vel, *velocity),
+                        "{} Hz at {} ms: got ({:?}, {:?}), expected ({:?}, {:?})",
+                        hz,
+                        now,
+                        got_v,
+                        got_vel,
+                        value,
+                        velocity
+                    );
+                } else {
+                    prop_assert_eq!(at, Some(&(*now, *value, *velocity)), "{} Hz at {} ms", hz, now);
+                }
             }
         }
     }

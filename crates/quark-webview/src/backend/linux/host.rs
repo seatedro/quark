@@ -88,46 +88,7 @@ impl Host {
             parent,
             sink,
         } = request;
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_title(&options.title);
-        window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
-        // GTK grabs are per window group; a group of its own keeps one
-        // modal from blocking input to another parent's modal.
-        gtk::WindowGroup::new().add_window(&window);
-        let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        window.add(&container);
-        window.realize();
-
-        let (relationship, link) = parent::attach(&window, &parent, display);
-        if relationship == crate::ParentRelationship::AppEnforced && options.require_native_parent {
-            // SAFETY: an unmapped top-level this function owns.
-            unsafe { window.destroy() };
-            return Err(OpenError::UnsupportedParenting);
-        }
-        let size = fit(&window, link.as_ref(), options.size, options.min_size);
-        window.set_default_size(size.0, size.1);
-        let min = (
-            options.min_size.0.round() as i32,
-            options.min_size.1.round() as i32,
-        );
-        window.set_geometry_hints(
-            None::<&gtk::Widget>,
-            Some(&gtk::gdk::Geometry::new(
-                min.0.min(size.0),
-                min.1.min(size.1),
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0.0,
-                0.0,
-                gtk::gdk::Gravity::NorthWest,
-            )),
-            gtk::gdk::WindowHints::MIN_SIZE,
-        );
-        parent::center_on(&window, link.as_ref(), size);
+        let (window, container, relationship, link) = create_window(&options, &parent, display)?;
 
         let built = match &options.view.data_store {
             DataStore::Persistent(profile) => {
@@ -352,8 +313,75 @@ fn fit(
     }
 }
 
+fn create_window(
+    options: &crate::WebWindowOptions,
+    parent: &crate::backend::NativeParent,
+    display: Display,
+) -> Result<
+    (
+        gtk::Window,
+        gtk::Box,
+        crate::ParentRelationship,
+        Option<parent::Link>,
+    ),
+    OpenError,
+> {
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    window.set_title(&options.title);
+    window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
+    // GTK grabs are per window group; a group of its own keeps one
+    // modal from blocking input to another parent's modal.
+    gtk::WindowGroup::new().add_window(&window);
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    window.add(&container);
+    window.realize();
+
+    let (relationship, link) = parent::attach(&window, parent, display);
+    if relationship == crate::ParentRelationship::AppEnforced && options.require_native_parent {
+        // SAFETY: an unmapped top-level this function owns.
+        unsafe { window.destroy() };
+        return Err(OpenError::UnsupportedParenting);
+    }
+    let size = fit(&window, link.as_ref(), options.size, options.min_size);
+    window.set_default_size(size.0, size.1);
+    let min = (
+        options.min_size.0.round() as i32,
+        options.min_size.1.round() as i32,
+    );
+    window.set_geometry_hints(
+        None::<&gtk::Widget>,
+        Some(&gtk::gdk::Geometry::new(
+            min.0.min(size.0),
+            min.1.min(size.1),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            0.0,
+            gtk::gdk::Gravity::NorthWest,
+        )),
+        gtk::gdk::WindowHints::MIN_SIZE,
+    );
+    parent::center_on(&window, link.as_ref(), size);
+    Ok((window, container, relationship, link))
+}
+
 fn connect(
     window: &gtk::Window,
+    native: &webkit2gtk::WebView,
+    sink: &NativeSink,
+    nav: &Rc<RefCell<Nav>>,
+    pending: &Pending,
+    closing: &Rc<Cell<bool>>,
+) {
+    connect_navigation(native, sink, nav, pending, closing);
+    connect_lifecycle(window, native, sink, nav, pending, closing);
+}
+
+fn connect_navigation(
     native: &webkit2gtk::WebView,
     sink: &NativeSink,
     nav: &Rc<RefCell<Nav>>,
@@ -435,6 +463,16 @@ fn connect(
             }
         });
     }
+}
+
+fn connect_lifecycle(
+    window: &gtk::Window,
+    native: &webkit2gtk::WebView,
+    sink: &NativeSink,
+    nav: &Rc<RefCell<Nav>>,
+    pending: &Pending,
+    closing: &Rc<Cell<bool>>,
+) {
     {
         // `window.open` arrives here (links with a target go through
         // decide-policy first). Never create a window: refuse and report it,

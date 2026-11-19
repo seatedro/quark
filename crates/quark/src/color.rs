@@ -162,6 +162,8 @@ mod tests {
     use super::*;
 
     proptest! {
+        #![proptest_config(crate::test_support::proptest_config(64))]
+
         // A settled transition must paint exactly the color it started from.
         #[test]
         fn oklab_round_trips_opaque_colors(r: u8, g: u8, b: u8) {

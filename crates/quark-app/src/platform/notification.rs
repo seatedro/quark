@@ -247,6 +247,7 @@ mod macos {
         }
         let center = UNUserNotificationCenter::currentNotificationCenter();
         let delegate = Delegate::alloc().set_ivars(events.clone());
+        // SAFETY: `Delegate` inherits `NSObject`, whose `init` is valid on a freshly allocated instance.
         let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         CENTER.with_borrow_mut(|slot| {

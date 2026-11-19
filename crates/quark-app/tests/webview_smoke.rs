@@ -229,8 +229,15 @@ mod browser {
     }
 
     fn scenarios(f: &Fixture) -> Vec<Step> {
-        use Step::*;
         let app_idp = options(f, &[Site::App, Site::Idp]);
+        let mut steps = eval_scenarios(f, &app_idp);
+        steps.extend(policy_scenarios(f, &app_idp));
+        steps.extend(storage_and_popup_scenarios(f, app_idp));
+        steps
+    }
+
+    fn eval_scenarios(f: &Fixture, app_idp: &WebWindowOptions) -> Vec<Step> {
+        use Step::*;
         let getter = |token: &str| f.url(Site::App, "/getter", &[("token", token)]);
         let get_token = "return await window.fixture.getToken();";
         let error = |what, is: fn(&EvalError) -> bool| Want::Error(what, is);
@@ -301,6 +308,14 @@ mod browser {
                 }),
             ),
             Close,
+        ]
+    }
+
+    fn policy_scenarios(f: &Fixture, app_idp: &WebWindowOptions) -> Vec<Step> {
+        use Step::*;
+        let get_token = "return await window.fixture.getToken();";
+        let error = |what, is: fn(&EvalError) -> bool| Want::Error(what, is);
+        vec![
             Open(
                 "redirect to a disallowed origin",
                 f.url(
@@ -387,6 +402,15 @@ mod browser {
             }),
             NoRequest(Site::Foreign, "/frame"),
             Close,
+        ]
+    }
+
+    fn storage_and_popup_scenarios(f: &Fixture, app_idp: WebWindowOptions) -> Vec<Step> {
+        use Step::*;
+        let getter = |token: &str| f.url(Site::App, "/getter", &[("token", token)]);
+        let get_token = "return await window.fixture.getToken();";
+        let error = |what, is: fn(&EvalError) -> bool| Want::Error(what, is);
+        vec![
             Open("evaluation deadline", getter("t"), {
                 let limits = EvaluationLimits::default().timeout(Duration::from_secs(1));
                 let view = options(f, &[Site::App])
