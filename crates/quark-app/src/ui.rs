@@ -1909,39 +1909,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         let (scene, ime) = self.finish_frame(painted);
         // The frame painted every write so far.
         self.shared.signals.clear_dirty();
-        // The frame may have shown or hidden an element under a still
-        // pointer, such as an action revealed by the hover it painted; the
-        // hovered set it leaves behind no longer differs on the next move.
-        let cursor = cursor_icon(self.win.router.cursor_over(&self.win.hovered));
-        if cursor != self.win.cursor {
-            self.win.cursor = cursor;
-            cx.set_cursor(cursor);
-        }
-        // The frame may have moved a region under a still pointer.
-        let win = &mut *self.win;
-        if win
-            .tooltip
-            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
-        {
-            cx.request_frame();
-        }
-        self.forward_material_regions(cx);
-        if ime.reset {
-            cx.reset_ime();
-        }
-        if let Some(allowed) = ime.allowed {
-            cx.set_ime_allowed(allowed);
-        }
-        if let Some(caret) = ime.cursor_area {
-            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
-        }
-        if let Some(at_ms) = self
-            .win
-            .text_pointer
-            .next_autoscroll_ms(&self.win.text_areas)
-        {
-            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
-        }
+        self.apply_post_frame(ime, clock_ms, cx);
         #[cfg(feature = "devtools")]
         let frame = crate::devtools::PaintedFrame {
             router: &self.win.router,
@@ -2116,6 +2084,44 @@ impl<U: UiApp> UiAdapter<U> {
                 kind: r.kind,
             }));
         cx.set_material_regions(win.material_regions.clone());
+    }
+
+    /// Sync cursor, tooltip, material regions, IME state, and autoscroll
+    /// scheduling after a frame finishes painting.
+    fn apply_post_frame(&mut self, ime: ImeRequest, clock_ms: u64, cx: &mut FrameContext) {
+        // The frame may have shown or hidden an element under a still
+        // pointer, such as an action revealed by the hover it painted; the
+        // hovered set it leaves behind no longer differs on the next move.
+        let cursor = cursor_icon(self.win.router.cursor_over(&self.win.hovered));
+        if cursor != self.win.cursor {
+            self.win.cursor = cursor;
+            cx.set_cursor(cursor);
+        }
+        // The frame may have moved a region under a still pointer.
+        let win = &mut *self.win;
+        if win
+            .tooltip
+            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
+        {
+            cx.request_frame();
+        }
+        self.forward_material_regions(cx);
+        if ime.reset {
+            cx.reset_ime();
+        }
+        if let Some(allowed) = ime.allowed {
+            cx.set_ime_allowed(allowed);
+        }
+        if let Some(caret) = ime.cursor_area {
+            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+        }
+        if let Some(at_ms) = self
+            .win
+            .text_pointer
+            .next_autoscroll_ms(&self.win.text_areas)
+        {
+            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
+        }
     }
 
     /// Keep `painted`'s input state for routing until the next frame, and

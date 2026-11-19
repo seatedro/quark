@@ -115,30 +115,7 @@ pub(super) fn convert(
             border.corner_radii,
             border.widths,
         ),
-        Primitive::Shadow(shadow) => {
-            let sigma = (shadow.blur_radius * 0.5).max(0.5);
-            let expansion = sigma * 3.0;
-            let rect = shadow.rect;
-            let [offset_x, offset_y] = shadow.offset;
-            Drawn::Shadow(ShadowInstance {
-                draw_bounds: [
-                    rect.x + offset_x - expansion,
-                    rect.y + offset_y - expansion,
-                    rect.width + expansion * 2.0,
-                    rect.height + expansion * 2.0,
-                ],
-                shadow_bounds: [
-                    rect.x + offset_x,
-                    rect.y + offset_y,
-                    rect.width,
-                    rect.height,
-                ],
-                color: color_to_unit(shadow.color),
-                params: [sigma, shadow.corner_radius, 0.0, 0.0],
-                clip_bounds: [0.0; 4],
-                clip_radii: [0.0; 4],
-            })
-        }
+        Primitive::Shadow(shadow) => convert_shadow(shadow),
         Primitive::TextRun(text) => Drawn::Text(text.clone()),
         Primitive::RichTextRun(text) => Drawn::RichText(text.clone()),
         Primitive::StyledText(text) => Drawn::StyledText(text.clone()),
@@ -164,50 +141,9 @@ pub(super) fn convert(
                 extra: [0.0; 4],
             })
         }
-        Primitive::Stripes(stripes) => {
-            let rect = stripes.rect;
-            let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
-            Drawn::Effect(EffectQuadInstance {
-                bounds: [rect.x, rect.y, rect.width, rect.height],
-                color_a: color_to_unit(stripes.colors[0]),
-                color_b: color_to_unit(stripes.colors[1]),
-                params: [
-                    EFFECT_STRIPES,
-                    clean(stripes.angle, 0.0),
-                    // Under a pixel, stripes would alias into noise.
-                    clean(stripes.period, 1.0).max(1.0),
-                    stripes.corner_radii.iter().copied().fold(0.0, f32::max),
-                ],
-                clip_bounds: [0.0; 4],
-                clip_radii: [0.0; 4],
-                extra: [clean(stripes.duty, 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
-            })
-        }
+        Primitive::Stripes(stripes) => convert_stripes(stripes),
         Primitive::Image(img) => Drawn::Image(img.clone()),
-        Primitive::Icon(icon) => {
-            // Whole pixels; moving by whole pixels keeps them whole.
-            let rect = Rect {
-                x: icon.rect.x.round(),
-                y: icon.rect.y.round(),
-                width: icon.rect.width.round(),
-                height: icon.rect.height.round(),
-            };
-            let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
-            let cache_key = crate::icons::cache_key_with(&icon.name, px_size, icon.color, fonts);
-            // Once uploaded, the cache key alone is enough to draw.
-            let (rgba, width, height) = if rasterize(cache_key) {
-                crate::icons::rasterize_svg_with(&icon.name, px_size, icon.color, fonts)
-            } else {
-                (empty_rgba(), 0, 0)
-            };
-            Drawn::Image(ImagePrimitive {
-                rect,
-                width,
-                height,
-                rgba,
-                cache_key,
-            })
-        }
+        Primitive::Icon(icon) => convert_icon(icon, rasterize, fonts),
         Primitive::Path(_)
         | Primitive::Chunk(_)
         | Primitive::ClipStart(_)
@@ -219,6 +155,80 @@ pub(super) fn convert(
         | Primitive::ZIndexPush(_)
         | Primitive::ZIndexPop
         | Primitive::LayerBoundary => return None,
+    })
+}
+
+fn convert_shadow(shadow: &quark::scene::ShadowPrimitive) -> Drawn {
+    let sigma = (shadow.blur_radius * 0.5).max(0.5);
+    let expansion = sigma * 3.0;
+    let rect = shadow.rect;
+    let [offset_x, offset_y] = shadow.offset;
+    Drawn::Shadow(ShadowInstance {
+        draw_bounds: [
+            rect.x + offset_x - expansion,
+            rect.y + offset_y - expansion,
+            rect.width + expansion * 2.0,
+            rect.height + expansion * 2.0,
+        ],
+        shadow_bounds: [
+            rect.x + offset_x,
+            rect.y + offset_y,
+            rect.width,
+            rect.height,
+        ],
+        color: color_to_unit(shadow.color),
+        params: [sigma, shadow.corner_radius, 0.0, 0.0],
+        clip_bounds: [0.0; 4],
+        clip_radii: [0.0; 4],
+    })
+}
+
+fn convert_stripes(stripes: &quark::scene::StripesPrimitive) -> Drawn {
+    let rect = stripes.rect;
+    let clean = |v: f32, fallback: f32| if v.is_finite() { v } else { fallback };
+    Drawn::Effect(EffectQuadInstance {
+        bounds: [rect.x, rect.y, rect.width, rect.height],
+        color_a: color_to_unit(stripes.colors[0]),
+        color_b: color_to_unit(stripes.colors[1]),
+        params: [
+            EFFECT_STRIPES,
+            clean(stripes.angle, 0.0),
+            // Under a pixel, stripes would alias into noise.
+            clean(stripes.period, 1.0).max(1.0),
+            stripes.corner_radii.iter().copied().fold(0.0, f32::max),
+        ],
+        clip_bounds: [0.0; 4],
+        clip_radii: [0.0; 4],
+        extra: [clean(stripes.duty, 0.5).clamp(0.0, 1.0), 0.0, 0.0, 0.0],
+    })
+}
+
+fn convert_icon(
+    icon: &quark::scene::IconPrimitive,
+    rasterize: impl FnOnce(u64) -> bool,
+    fonts: Option<&SvgFonts>,
+) -> Drawn {
+    // Whole pixels; moving by whole pixels keeps them whole.
+    let rect = Rect {
+        x: icon.rect.x.round(),
+        y: icon.rect.y.round(),
+        width: icon.rect.width.round(),
+        height: icon.rect.height.round(),
+    };
+    let px_size = icon.rect.width.max(icon.rect.height).ceil() as u32;
+    let cache_key = crate::icons::cache_key_with(&icon.name, px_size, icon.color, fonts);
+    // Once uploaded, the cache key alone is enough to draw.
+    let (rgba, width, height) = if rasterize(cache_key) {
+        crate::icons::rasterize_svg_with(&icon.name, px_size, icon.color, fonts)
+    } else {
+        (empty_rgba(), 0, 0)
+    };
+    Drawn::Image(ImagePrimitive {
+        rect,
+        width,
+        height,
+        rgba,
+        cache_key,
     })
 }
 
@@ -386,60 +396,80 @@ pub(super) fn emit(drawn: Drawn, draw: &Draw<'_>, fl: &mut Flattener, out: &mut 
                 paint: GlyphPaint::default(),
             });
         }
-        Drawn::StyledText(text) => {
-            let rect = text.rect.offset(dx, dy);
-            let Some(intersection) = rect.intersection(clip.scissor) else {
-                return;
-            };
-            let key = fl.place(draw.z, PrimKind::Text, intersection);
-            let paint = GlyphPaint::of(&text, rect, fl.text_rendering);
-            out.rich_texts.push(ClippedRichText {
-                key,
-                primitive: RichTextPrimitive {
-                    rect,
-                    layout: text.layout,
-                    default_color: text.fill.base_color(),
-                    span_colors: text.span_colors,
-                },
-                clip: intersection,
-                alpha,
-                run: draw.run,
-                paint,
-            });
-        }
+        Drawn::StyledText(text) => emit_styled_text(text, draw, fl, out),
         Drawn::Blur(blur) => {
             if let Some(rect) = blur.rect.offset(dx, dy).intersection(clip.scissor) {
                 fl.barrier(draw.z, FlattenedBlurRegion { rect, ..blur });
             }
         }
-        Drawn::Path { area, bands } => {
-            let Some(visible) = area.offset(dx, dy).intersection(clip.scissor) else {
-                return;
-            };
-            // Fill and stroke each take their own key, so the stroke draws
-            // on top; the bands of one shape never overlap.
-            let key = fl.place(draw.z, PrimKind::Path, visible);
-            for band in &draw.bands[bands.start as usize..bands.end as usize] {
-                let mut instance = *band;
-                shift(&mut instance.bounds);
-                if bounds_rect(instance.bounds)
-                    .intersection(clip.scissor)
-                    .is_none()
-                {
-                    continue;
-                }
-                instance.origin_rule[0] += dx;
-                instance.origin_rule[1] += dy;
-                instance.segments[0] += draw.segment_base;
-                instance.color = fade(instance.color, alpha);
-                (instance.clip_bounds, instance.clip_radii) = (clip_bounds, clip_radii);
-                out.paths.push(ClippedPath {
-                    key,
-                    instance,
-                    clip: clip.scissor,
-                });
-            }
+        Drawn::Path { area, bands } => emit_path(area, bands, draw, fl, out),
+    }
+}
+
+fn emit_styled_text(
+    text: quark::scene::StyledTextPrimitive,
+    draw: &Draw<'_>,
+    fl: &mut Flattener,
+    out: &mut FlattenedScene,
+) {
+    let (dx, dy) = draw.shift;
+    let rect = text.rect.offset(dx, dy);
+    let Some(intersection) = rect.intersection(draw.clip.scissor) else {
+        return;
+    };
+    let key = fl.place(draw.z, PrimKind::Text, intersection);
+    let paint = GlyphPaint::of(&text, rect, fl.text_rendering);
+    out.rich_texts.push(ClippedRichText {
+        key,
+        primitive: RichTextPrimitive {
+            rect,
+            layout: text.layout,
+            default_color: text.fill.base_color(),
+            span_colors: text.span_colors,
+        },
+        clip: intersection,
+        alpha: draw.alpha,
+        run: draw.run,
+        paint,
+    });
+}
+
+fn emit_path(
+    area: Rect,
+    bands: std::ops::Range<u32>,
+    draw: &Draw<'_>,
+    fl: &mut Flattener,
+    out: &mut FlattenedScene,
+) {
+    let (dx, dy) = draw.shift;
+    let clip = draw.clip;
+    let Some(visible) = area.offset(dx, dy).intersection(clip.scissor) else {
+        return;
+    };
+    let (clip_bounds, clip_radii) = clip.rounded_attributes();
+    // Fill and stroke each take their own key, so the stroke draws
+    // on top; the bands of one shape never overlap.
+    let key = fl.place(draw.z, PrimKind::Path, visible);
+    for band in &draw.bands[bands.start as usize..bands.end as usize] {
+        let mut instance = *band;
+        instance.bounds[0] += dx;
+        instance.bounds[1] += dy;
+        if bounds_rect(instance.bounds)
+            .intersection(clip.scissor)
+            .is_none()
+        {
+            continue;
         }
+        instance.origin_rule[0] += dx;
+        instance.origin_rule[1] += dy;
+        instance.segments[0] += draw.segment_base;
+        instance.color = fade(instance.color, draw.alpha);
+        (instance.clip_bounds, instance.clip_radii) = (clip_bounds, clip_radii);
+        out.paths.push(ClippedPath {
+            key,
+            instance,
+            clip: clip.scissor,
+        });
     }
 }
 

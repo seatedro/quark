@@ -261,28 +261,7 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         });
         scene.push(chunk);
     };
-    let through = |layer: LayerTransform| {
-        move |scene: &mut Scene, mut chunk: Primitive| {
-            if let Primitive::Chunk(placed) = &mut chunk {
-                placed.layer = layer;
-            }
-            scene.push(chunk);
-        }
-    };
-    let slid = LayerTransform {
-        offset_x: 7.3,
-        offset_y: -3.0,
-        ..LayerTransform::IDENTITY
-    };
-    let shrunk = LayerTransform {
-        opacity: 0.6,
-        offset_x: 0.0,
-        offset_y: 6.0,
-        scale_x: 0.9,
-        scale_y: 0.8,
-        origin: [60.0, 40.0],
-    };
-    let cases: [(&str, Scene, Scene); 12] = [
+    let cases: [(&str, Scene, Scene); 10] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -333,6 +312,39 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             framed(&card, [10.0, 10.0], just),
             framed(&card, [10.0, 10.0], covered),
         ),
+    ];
+    for (name, warm, scene) in &cases {
+        // Twice, so the chunk can record its placement before `scene`.
+        assert_draws_expanded(name, &[warm, warm], scene, &mut text);
+    }
+}
+
+#[test]
+fn layered_chunks_draw_the_expanded_scenes_pixels() {
+    let mut text = test_text();
+    let card = chunk(card(&mut text));
+    let through = |layer: LayerTransform| {
+        move |scene: &mut Scene, mut chunk: Primitive| {
+            if let Primitive::Chunk(placed) = &mut chunk {
+                placed.layer = layer;
+            }
+            scene.push(chunk);
+        }
+    };
+    let slid = LayerTransform {
+        offset_x: 7.3,
+        offset_y: -3.0,
+        ..LayerTransform::IDENTITY
+    };
+    let shrunk = LayerTransform {
+        opacity: 0.6,
+        offset_x: 0.0,
+        offset_y: 6.0,
+        scale_x: 0.9,
+        scale_y: 0.8,
+        origin: [60.0, 40.0],
+    };
+    let cases: [(&str, Scene, Scene); 2] = [
         (
             "slid by its layer at 1.5x",
             physical(framed(&card, [10.0, 10.0], just), 1.5),
@@ -345,7 +357,6 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         ),
     ];
     for (name, warm, scene) in &cases {
-        // Twice, so the chunk can record its placement before `scene`.
         assert_draws_expanded(name, &[warm, warm], scene, &mut text);
     }
 }
