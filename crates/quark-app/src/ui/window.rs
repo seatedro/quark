@@ -11,7 +11,7 @@ use quark::hit::HitId;
 use quark::scene::Scene;
 use quark_ui::FocusId;
 use quark_ui::accessibility::{AccessibilityFrame, Announcer};
-use quark_ui::animation::AnimationTable;
+use quark_ui::animation::{AnimationTable, PresenceTable};
 use quark_ui::element::{
     DragPreviewLayer, ElementCache, ElementHandles, ImeTarget, InputFrame, InputRouter, JumpHints,
     TextInputHitArea, TooltipRegion,
@@ -85,6 +85,8 @@ pub(crate) struct WindowUiState {
     /// Scale factor of the last painted frame, for accessibility bounds.
     pub(super) scale_factor: f32,
     pub(super) animations: AnimationTable,
+    /// Keyed divs entering and leaving, and the frames exits still paint.
+    pub(super) presence: PresenceTable,
     /// Cached subtrees and the layout engine, reused every frame.
     pub(super) element_cache: ElementCache,
     /// Buffers of the frame before last, reused by the next frame: the
@@ -258,6 +260,7 @@ impl WindowUiState {
             composition: Composition::None,
             scale_factor: 1.0,
             animations: AnimationTable::new(),
+            presence: PresenceTable::new(),
             element_cache: ElementCache::new(),
             spare_scene: Scene::default(),
             spare_accessibility: AccessibilityFrame::default(),

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use accesskit::NodeId;
-use quark::scene::SceneChunk;
+use quark::scene::{LayerTransform, SceneChunk};
 
 use crate::animation::AnimKey;
 
@@ -91,6 +91,8 @@ pub(super) struct PaintRecord {
     geometry_layout: Vec<Rect>,
     geometry_clip: Vec<Rect>,
     transitions: Vec<AnimKey>,
+    /// Presence rows the subtree painted, with their rects relative.
+    presence: Vec<(AnimKey, Rect)>,
     /// Scroll handles the subtree painted, viewports relative.
     scroll: Vec<ScrollWatch>,
 }
@@ -125,6 +127,7 @@ impl PaintRecord {
         self.geometry_layout.clear();
         self.geometry_clip.clear();
         self.transitions.clear();
+        self.presence.clear();
         self.scroll.clear();
     }
 
@@ -191,6 +194,7 @@ struct PaintMarks {
 struct PhaseStart {
     volatile: u32,
     transitions: usize,
+    presence: usize,
 }
 
 impl PhaseStart {
@@ -198,6 +202,7 @@ impl PhaseStart {
         Self {
             volatile: cx.volatile_reads(),
             transitions: cx.transition_keys().len(),
+            presence: cx.presence_painted_len(),
         }
     }
 }
@@ -241,13 +246,19 @@ impl Recording {
     }
 
     /// Close a phase: count the clock-dependent requests the subtree made
-    /// and keep the transition keys it touched. What it read is tracked as
-    /// signals.
+    /// and keep the transition keys and presence rows it touched. What it
+    /// read is tracked as signals.
     fn end_phase(&mut self, record: &mut PaintRecord, cx: &ElementContext) {
         self.volatile += cx.volatile_reads().wrapping_sub(self.phase.volatile);
         record
             .transitions
             .extend_from_slice(&cx.transition_keys()[self.phase.transitions..]);
+        let (ox, oy) = self.origin;
+        record.presence.extend(
+            cx.presence_painted_since(self.phase.presence)
+                .iter()
+                .map(|&(key, rect)| (key, rect.offset(-ox, -oy))),
+        );
     }
 
     pub(super) fn end_prepaint(&mut self, cx: &mut ElementContext) {
@@ -503,11 +514,12 @@ pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext)
     true
 }
 
-/// Replay `row`'s paint output at the boundary's origin. False when the
-/// inherited paint state differs from the recording's.
+/// Replay `row`'s paint output at the boundary's origin, through `layer`.
+/// False when the inherited paint state differs from the recording's.
 pub(super) fn replay_paint(
     row: u32,
     bounds: Bounds,
+    layer: LayerTransform,
     scene: &mut Scene,
     cx: &mut ElementContext,
 ) -> bool {
@@ -522,7 +534,7 @@ pub(super) fn replay_paint(
 
     // The recording stays as it is; the scene draws it by reference.
     if let Some(chunk) = record.scene.as_ref().filter(|chunk| !chunk.is_empty()) {
-        scene.chunk(chunk, [ox, oy]);
+        scene.chunk_with_layer(chunk, [ox, oy], layer);
     }
 
     let base = cx.semantic.nodes().len();
@@ -588,6 +600,7 @@ pub(super) fn replay_paint(
             .map(|r| replay_selectable(r, (ox, oy), transform)),
     );
     cx.keep_transition_keys(&record.transitions);
+    cx.replay_presence(&record.presence, (ox, oy));
 
     put_record(cx, row, record);
     true

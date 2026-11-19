@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use quark::reactive::Signal;
+use quark_ui::animation::Transition;
 use quark_ui::document::{
     DocumentStyle, MarkdownDocument, MarkdownEntry, RowAlign, RowChrome, RowDecorator, RowStyle,
     TextMeasurer,
@@ -186,6 +187,52 @@ fn a_frame_that_schedules_the_next_allocates_nothing() {
         ui.next_frame_in(),
         Some(std::time::Duration::from_millis(16))
     );
+}
+
+/// A keyed card that enters and leaves with a transition.
+struct Presence {
+    shown: bool,
+}
+
+impl UiApp for Presence {
+    type Action = ();
+    type Message = ();
+
+    fn view(&mut self, cx: &mut ViewContext) -> AnyElement {
+        let card = div()
+            .key("card")
+            .w(80.0)
+            .h(40.0)
+            .bg(cx.theme.colors.surface)
+            .presence(Transition::fade().and(Transition::slide(0.0, 12.0)));
+        div()
+            .size_full()
+            .children(self.shown.then(|| card.into_any()))
+            .into_any()
+    }
+
+    fn update(&mut self, _action: (), _cx: &mut UiContext) {}
+}
+
+// A present card records its frame into the chunk it recorded into last
+// frame, and an exit draws the frame it kept through its animated layer.
+#[test]
+fn present_and_exiting_presence_frames_allocate_nothing() {
+    let mut ui = UiTestHarness::new(Presence { shown: true }, (200.0, 100.0), 1.0);
+    ui.set_accessibility_active(false);
+    for _ in 0..3 {
+        ui.frame();
+    }
+    let ((), present) = test_alloc::count(|| {
+        ui.frame();
+    });
+    ui.app_mut().shown = false;
+    ui.frame();
+    ui.advance(16);
+    let ((), exiting) = test_alloc::count(|| {
+        ui.advance(16);
+    });
+    assert_eq!((present, exiting), (0, 0));
 }
 
 #[test]

@@ -40,10 +40,14 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
 use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::runner::{HeadlessRunner, VirtualWindow};
+
+mod motion;
+
 use crate::{
     App, AppEvent, CloseReason, DesktopPoint, InputEvent, KeyChord, KeyKind, MonitorInfo,
     PlatformCapabilities, UiAdapter, UiApp, UiSender, WindowHandle, WindowPlacement,
 };
+pub use motion::MotionAudit;
 
 /// What the app asked of the window's IME, as the frames so far left it
 /// ([`UiTestHarness::ime`]).

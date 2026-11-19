@@ -38,7 +38,9 @@ pub struct ElementContext<'a> {
     /// Earliest clock time (ms) an element asked to be painted again at.
     next_frame_ms: Option<u64>,
     /// The window's animation table, when the host keeps one.
-    animations: Option<&'a mut AnimationTable>,
+    pub(super) animations: Option<&'a mut AnimationTable>,
+    /// The window's presence table, when the host keeps one.
+    pub(super) presence: Option<&'a mut PresenceTable>,
     /// Keys that animated a style transition this frame.
     transition_keys: Vec<AnimKey>,
     pub debug_wireframe: bool,
@@ -130,6 +132,7 @@ impl<'a> ElementContext<'a> {
             clock_ms: 0,
             next_frame_ms: None,
             animations: None,
+            presence: None,
             transition_keys: Vec::new(),
             debug_wireframe: false,
             text_input_hit_areas: Vec::new(),
@@ -336,10 +339,22 @@ impl<'a> ElementContext<'a> {
         self
     }
 
+    /// Attach the window's presence table so keyed divs with a
+    /// [`Div::presence`] transition enter and leave; it needs the animation
+    /// table too. The table persists across frames; attaching it begins
+    /// one.
+    pub fn with_presence(mut self, table: &'a mut PresenceTable) -> Self {
+        table.begin_frame();
+        self.presence = Some(table);
+        self
+    }
+
     /// End the frame for animations: drop transition rows of keyed elements
-    /// this frame did not paint, so removed elements do not keep rows. Call
-    /// once after painting every root of the frame.
+    /// this frame did not paint, so removed elements do not keep rows, and
+    /// presence rows whose exit settled. Call once after painting every
+    /// root of the frame.
     pub fn finish_frame(&mut self) {
+        self.finish_presence();
         if let Some(table) = self.animations.as_deref_mut() {
             crate::animation::sweep_transitions(table, &mut self.transition_keys);
         }
@@ -686,6 +701,11 @@ impl<'a> ElementContext<'a> {
         if self.hit_spaces.pop().is_some() {
             self.clip_stack.pop();
         }
+    }
+
+    /// The clips around what paints now, in window coordinates.
+    pub(super) fn current_window_clip(&self) -> Rect {
+        self.current_paint_space().window_clip
     }
 
     fn current_paint_space(&self) -> PaintSpace {

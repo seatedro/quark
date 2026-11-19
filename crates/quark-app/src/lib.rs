@@ -232,6 +232,8 @@ pub mod macos_window;
 mod menu_bar_tests;
 mod panic_hook;
 pub mod platform;
+#[cfg(all(test, feature = "test-support"))]
+mod presence_tests;
 #[cfg(any(feature = "profile-puffin", feature = "profile-tracy"))]
 mod profile;
 #[cfg(all(test, feature = "test-support"))]

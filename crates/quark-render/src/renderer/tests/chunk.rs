@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::text_engine::MAX_DRAW_OFFSETS;
-use quark::scene::SceneChunk;
+use quark::scene::{LayerTransform, SceneChunk};
 use quark_text::{TextParams, TextSpan, TextStyle};
 
 use super::*;
@@ -261,7 +261,28 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
         });
         scene.push(chunk);
     };
-    let cases: [(&str, Scene, Scene); 10] = [
+    let through = |layer: LayerTransform| {
+        move |scene: &mut Scene, mut chunk: Primitive| {
+            if let Primitive::Chunk(placed) = &mut chunk {
+                placed.layer = layer;
+            }
+            scene.push(chunk);
+        }
+    };
+    let slid = LayerTransform {
+        offset_x: 7.3,
+        offset_y: -3.0,
+        ..LayerTransform::IDENTITY
+    };
+    let shrunk = LayerTransform {
+        opacity: 0.6,
+        offset_x: 0.0,
+        offset_y: 6.0,
+        scale_x: 0.9,
+        scale_y: 0.8,
+        origin: [60.0, 40.0],
+    };
+    let cases: [(&str, Scene, Scene); 12] = [
         (
             "unchanged",
             framed(&card, [10.0, 10.0], just),
@@ -311,6 +332,16 @@ fn chunked_scenes_draw_the_expanded_scenes_pixels() {
             "where it was, over new primitives",
             framed(&card, [10.0, 10.0], just),
             framed(&card, [10.0, 10.0], covered),
+        ),
+        (
+            "slid by its layer at 1.5x",
+            physical(framed(&card, [10.0, 10.0], just), 1.5),
+            physical(framed(&card, [10.0, 10.0], through(slid)), 1.5),
+        ),
+        (
+            "faded and scaled by its layer",
+            framed(&card, [10.0, 10.0], just),
+            framed(&card, [10.0, 10.0], through(shrunk)),
         ),
     ];
     for (name, warm, scene) in &cases {

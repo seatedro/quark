@@ -44,6 +44,7 @@ pub fn render_element_at(
         root.prepaint_with_offset(&engine, cx, x, y);
         cx.run_hit_test();
         root.paint_with_offset(&engine, scene, cx, x, y);
+        cx.paint_exits(scene);
     }
     cache::end_frame(cx, engine);
     #[cfg(feature = "devtools")]

@@ -558,19 +558,26 @@ impl SignalStore {
     /// Write only if the new value differs from the current one (`PartialEq`).
     /// Returns `true` if the write happened. Use when pushing values that may
     /// be equal frame-to-frame so stable values don't re-dirty subscribers.
+    /// A changed value is assigned in place, so pushing a value every frame
+    /// allocates nothing.
     pub fn set_if_changed<T: 'static + PartialEq>(&self, signal: Signal<T>, value: T) -> bool {
         {
             let mut inner = self.inner_mut();
             let node = inner.node_checked(signal.id);
-            if let Some(cur) = node.value.as_ref().and_then(|b| b.downcast_ref::<T>())
-                && *cur == value
-            {
-                return false;
+            match node.value.as_mut().and_then(|b| b.downcast_mut::<T>()) {
+                Some(cur) if *cur == value => return false,
+                Some(cur) => *cur = value,
+                None => node.value = Some(Box::new(value)),
             }
-            node.value = Some(Box::new(value));
         }
         self.notify(signal.id.index as usize);
         true
+    }
+
+    /// Whether `signal` still names a value: false once it was disposed,
+    /// even if its slot was reused.
+    pub fn is_live<T>(&self, signal: Signal<T>) -> bool {
+        self.inner_ref().live(signal.id)
     }
 
     /// Mutate a signal's value in place and propagate dirtiness to subscribers.

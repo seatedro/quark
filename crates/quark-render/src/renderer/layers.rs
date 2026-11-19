@@ -304,7 +304,8 @@ fn layer_mode(plan: &mut LayerPlan, bounds: Option<Rect>, drawables: u32) -> Lay
     })
 }
 
-/// Whether a chunk of `prims` starts a layer or sits inside one.
+/// Whether a chunk of `prims` starts a layer, is drawn through one, or
+/// sits inside one.
 pub(crate) fn needs_expansion(prims: &[Primitive]) -> bool {
     let mut depth = 0u32;
     prims.iter().any(|primitive| match primitive {
@@ -316,19 +317,32 @@ pub(crate) fn needs_expansion(prims: &[Primitive]) -> bool {
             depth = depth.saturating_sub(1);
             false
         }
-        Primitive::Chunk(chunk) => depth > 0 || chunk.chunk.has_layers(),
+        Primitive::Chunk(chunk) => depth > 0 || chunk.needs_layer() || chunk.chunk.has_layers(),
         _ => false,
     })
 }
 
 /// Push `primitive` onto `out`, replacing a chunk that starts a layer or
-/// sits inside one (`depth` layers deep) with its primitives.
+/// sits inside one (`depth` layers deep) with its primitives, and a chunk
+/// drawn through a layer with that layer around them.
 pub(crate) fn expand(primitive: Primitive, depth: &mut u32, out: &mut Vec<Primitive>) {
     match primitive {
         Primitive::LayerStart(_) | Primitive::IsolateStart(_) => *depth += 1,
         Primitive::LayerEnd | Primitive::IsolateEnd => *depth = depth.saturating_sub(1),
-        Primitive::Chunk(ref chunk) if *depth > 0 || chunk.chunk.has_layers() => {
+        Primitive::Chunk(ref chunk) if chunk.needs_layer() => {
+            out.push(Primitive::LayerStart(chunk.layer_primitive()));
+            *depth += 1;
             chunk.for_each_placed(|placed| expand(placed, depth, out));
+            *depth -= 1;
+            out.push(Primitive::LayerEnd);
+            return;
+        }
+        Primitive::Chunk(ref chunk) if *depth > 0 || chunk.chunk.has_layers() => {
+            let [dx, dy] = chunk.layer_shift();
+            chunk.for_each_placed(|mut placed| {
+                placed.offset(dx, dy);
+                expand(placed, depth, out);
+            });
             return;
         }
         _ => {}

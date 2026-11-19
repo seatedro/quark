@@ -196,11 +196,31 @@ pub fn tint(base: Color, color: Color, amount: f32) -> Color {
 
 - `div().transition(props, motion)` animates the listed style properties
   whenever their resolved value changes, from the value on screen.
-- Colors interpolate in premultiplied Oklab, so a fade between theme colors
-  skips grey.
+- Motions: `Motion::snappy()`, `smooth()`, `calm()`, and
+  `Motion::spring_duration(duration_s, bounce)` (bounce 0 never overshoots,
+  above 0 bounces, below 0 is overdamped); `Motion::reduced_fade()` is what
+  reduced motion falls back to. Springs are solved in closed form, so a
+  motion looks the same at any frame rate and a retarget keeps its
+  velocity.
+- Colors interpolate in premultiplied Oklab (`Color::lerp_oklab`), so a
+  fade from transparent keeps its hue instead of passing through black.
+- `div().key(k).presence(Transition::fade().and(Transition::slide(0.0, 8.0)))`
+  enters when the div first appears and leaves when it is gone from the
+  tree: the window keeps painting its last frame, inert to the pointer,
+  until the exit settles, and a div back mid-exit returns from where it
+  is. `Transition::scale`, `asymmetric`, and `with_motion` build others.
+  Nothing animates in a window's first frame, and under reduced motion
+  every presence transition is a short fade.
 - `ViewContext::animations()` exposes the window's `AnimationTable` for
   values a component animates itself, keyed by stable identity. Moving rows
-  schedule the next frame.
+  schedule the next frame. `animate_rect` moves a rect's edges on their own
+  rows (a still edge never moves; `RectMotion::leading` lets the front edge
+  lead), `animate_color` blends in Oklab, and `animate_layer` drives a
+  layer that `cached(..).animated_layer(key)` draws a recorded subtree
+  through without rebuilding it.
+- `AnimationTable::bind_signal` and `bind_color_signal` write a row's value
+  into a signal each frame it changes, for reactive code that follows an
+  animation.
 - Example:
   [animation_demo.rs](../../crates/quark-app/examples/animation_demo.rs),
   including a spring that reverses with velocity intact.

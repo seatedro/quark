@@ -1828,6 +1828,8 @@ impl<U: UiApp> App for UiAdapter<U> {
             self.app.edit_text_in(window, target, command);
         }
         self.win.animations.tick(clock_ms);
+        // Before the view, so reactive code reads this frame's values.
+        self.win.animations.publish_signals(&self.shared.signals);
         #[cfg(feature = "devtools")]
         let view_started = std::time::Instant::now();
         let win = &mut *self.win;
@@ -1870,6 +1872,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_focus_visible(win.focus_visible)
         .with_clock(clock_ms)
         .with_animations(&mut win.animations)
+        .with_presence(&mut win.presence)
         .with_element_cache(&mut win.element_cache)
         .with_accessibility(accessibility)
         .with_input_frame(std::mem::take(&mut win.spare_input));

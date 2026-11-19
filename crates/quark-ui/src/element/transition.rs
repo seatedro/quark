@@ -127,12 +127,16 @@ impl PaintTransform {
 /// An absent color animates as transparent, so a background can fade in.
 fn color(
     key: AnimKey,
-    props: [PropId; 4],
+    base: PropId,
     target: Option<Color>,
     motion: Motion,
     cx: &mut ElementContext,
 ) -> Option<Color> {
-    let channels = animation::to_premul_oklab(target.unwrap_or(Color::TRANSPARENT));
+    let props = animation::color_props(base);
+    let channels = target
+        .unwrap_or(Color::TRANSPARENT)
+        .to_oklab()
+        .premultiplied();
     let mut current = [0.0; 4];
     let mut moving = false;
     for i in 0..4 {
@@ -145,7 +149,7 @@ fn color(
         // color rather than a value that went through f32 conversions.
         return target;
     }
-    Some(animation::from_premul_oklab(current)).filter(|c| c.a > 0)
+    Some(Color::from_oklab(quark::Oklab::from_premultiplied(current))).filter(|c| c.a > 0)
 }
 
 #[cfg(test)]

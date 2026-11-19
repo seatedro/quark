@@ -71,10 +71,13 @@ use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, DefaultHasher, Hash, Hasher};
 
 use quark::reactive::{SignalRead, track_reads};
+use quark::scene::LayerTransform;
 
 use super::layout::{LayoutPassState, MeasureMemo};
+use super::presence::layer_matrix;
 use super::scroll::ScrollBinding;
 use super::*;
+use crate::animation::AnimKey;
 use record::{Inherited, PaintRecord, Recording};
 use signals::{Bound, row_reads, tracked};
 pub use signals::{WindowFrameState, WindowSignals};
@@ -479,6 +482,8 @@ pub struct Cached<F> {
     /// The boundary's own box in its parent; only `layout` is used.
     style: ElementStyle,
     fill_height: bool,
+    /// The key whose animated layer the output is drawn through.
+    layer: Option<AnimKey>,
     build: Option<F>,
     state: State,
 }
@@ -531,6 +536,19 @@ impl<F> Cached<F> {
         self
     }
 
+    /// Draw the subtree through `key`'s animated layer (its
+    /// [`LAYER_PROPS`](crate::animation::LAYER_PROPS) rows; see
+    /// [`AnimationTable::animate_layer`](crate::animation::AnimationTable::animate_layer)),
+    /// scaled about its center. Opacity, offset, and scale change every
+    /// frame while the recording replays as it is; hit testing follows the
+    /// offset and scale. A boundary around this one keeps the layer it
+    /// recorded while it replays, so its inputs hash must change when the
+    /// animation starts.
+    pub fn animated_layer(mut self, key: AnimKey) -> Self {
+        self.layer = Some(key);
+        self
+    }
+
     /// The inputs hash, mixed with what every entry depends on that the
     /// caller does not hash: the inspector's style overrides, which apply
     /// to elements inside the subtree while it builds.
@@ -555,6 +573,7 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Cached<F> {
             hash,
             style: ElementStyle::default(),
             fill_height: false,
+            layer: None,
             build: Some(build),
             state: State::Idle,
         }
@@ -659,9 +678,16 @@ impl Live {
     }
 }
 
+/// The animated layer a boundary draws through this frame, and the move
+/// and scale it applies.
+pub struct CachedLayer {
+    layer: LayerTransform,
+    matrix: Option<Transform2D>,
+}
+
 impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
     type LayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = CachedLayer;
 
     fn request_layout(
         &mut self,
@@ -727,7 +753,47 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
         _layout_state: &mut (),
         engine: &LayoutEngine,
         cx: &mut ElementContext,
+    ) -> CachedLayer {
+        // Outside the recording: the layer is not part of the output.
+        let layer = self
+            .layer
+            .and_then(|key| cx.animated_layer(key, bounds))
+            .unwrap_or(LayerTransform::IDENTITY);
+        let layered = CachedLayer {
+            layer,
+            matrix: layer_matrix(layer, bounds),
+        };
+        if let Some(matrix) = layered.matrix {
+            cx.push_transform(matrix);
+        }
+        self.prepaint_content(bounds, engine, cx);
+        if layered.matrix.is_some() {
+            cx.pop_transform();
+        }
+        layered
+    }
+
+    fn paint(
+        &mut self,
+        bounds: Bounds,
+        _layout_state: &mut (),
+        layered: &mut CachedLayer,
+        engine: &LayoutEngine,
+        scene: &mut Scene,
+        cx: &mut ElementContext,
     ) {
+        if let Some(matrix) = layered.matrix {
+            cx.push_paint_transform(matrix);
+        }
+        self.paint_content(bounds, layered.layer, engine, scene, cx);
+        if layered.matrix.is_some() {
+            cx.pop_paint_transform();
+        }
+    }
+}
+
+impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Cached<F> {
+    fn prepaint_content(&mut self, bounds: Bounds, engine: &LayoutEngine, cx: &mut ElementContext) {
         if let State::Replay { row } = self.state {
             if record::replay_prepaint(row, bounds, cx) {
                 return;
@@ -739,17 +805,16 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
         }
     }
 
-    fn paint(
+    fn paint_content(
         &mut self,
         bounds: Bounds,
-        _layout_state: &mut (),
-        _prepaint_state: &mut (),
+        layer: LayerTransform,
         engine: &LayoutEngine,
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
         if let State::Replay { row } = self.state {
-            if record::replay_paint(row, bounds, scene, cx) {
+            if record::replay_paint(row, bounds, layer, scene, cx) {
                 return;
             }
             // Inherited paint state changed after prepaint: build now. The
@@ -760,7 +825,16 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
             self.state = State::Live(live);
         }
         if let State::Live(live) = &mut self.state {
+            // A live build draws through a layer around the recording, which
+            // a replay draws through its chunk's layer instead.
+            let layered = !layer.is_identity();
+            if layered {
+                scene.push_layer(layer.opacity, layer.transform_at([bounds.x, bounds.y]));
+            }
             live.paint(bounds, engine, scene, cx);
+            if layered {
+                scene.pop_layer();
+            }
         }
     }
 }

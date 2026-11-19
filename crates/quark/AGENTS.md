@@ -37,6 +37,10 @@ event loop, or app state. Those live in `quark-ui`, `quark-render`,
   the redraw need.
 - Re-entrant signal access is a bug. The store intentionally panics on nested
   mutable/immutable borrow conflicts instead of hiding feedback-loop writes.
+- `AnimationTable` rows are pure functions of time: each keeps its motion's
+  anchor and every tick evaluates the tween or spring in closed form. Do not
+  integrate per frame; the same motion must show the same values at 30, 60,
+  and 120 Hz, which a property test checks.
 - `scene::Scene` is pure data. This crate defines primitives; `quark-render`
   decides how to batch, cache, clip, and draw them.
 - `hit` is generic over the host click-result payload. Keep action routing in

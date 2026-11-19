@@ -50,6 +50,20 @@ fn greet_shows_the_typed_name() {
   [crates/quark-app/src/lib.rs](../../crates/quark-app/src/lib.rs) also
   delivers a `UiSender` message.
 
+## Motion
+
+- `quark_app::testing::MotionAudit` draws the main window at 120 Hz on the
+  fake clock and reads one value per frame with a probe over the scene
+  (a card's opacity, a panel's x).
+- `MotionAudit::until_settled(&mut ui, limit_ms, probe)` runs until no
+  frame is pending; `MotionAudit::for_ms` runs a fixed time, and `then`
+  joins two runs (an exit cut short by a return).
+- `assert_no_snaps(max_step)`, `assert_monotonic(rising)`, and
+  `assert_no_vanishing(rest, epsilon)` check the samples. Animation values
+  are pure functions of the clock, so a run is exact and repeatable.
+- Example:
+  [presence_tests.rs](../../crates/quark-app/src/presence_tests.rs).
+
 ## Pixels
 
 - Feature `headless-render`: `render_rgba()` draws the last frame on a

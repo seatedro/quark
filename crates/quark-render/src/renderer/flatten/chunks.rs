@@ -619,17 +619,27 @@ fn items_bounds(items: &[Item]) -> Option<Rect> {
 /// layers.
 pub(super) fn draw_chunk(chunk: &ChunkPrimitive, fl: &mut Flattener, out: &mut FlattenedScene) {
     let (clip, z, alpha) = (fl.clip(), fl.z(), fl.alpha);
-    draw(chunk, clip, z, alpha, fl, out);
+    draw(chunk, clip, z, alpha, (0.0, 0.0), fl, out);
 }
 
+/// Draw `chunk` moved by `moved` whole pixels on top of its placement:
+/// what the layers that only move it and the chunks around it add up to.
+/// Layers that fade or scale were expanded before drawing.
 fn draw(
     chunk: &ChunkPrimitive,
     outer: ActiveClip,
     z: i32,
     alpha: f32,
+    moved: (f32, f32),
     fl: &mut Flattener,
     out: &mut FlattenedScene,
 ) {
+    debug_assert!(
+        !chunk.needs_layer(),
+        "a chunk drawn through a layer is expanded"
+    );
+    let [layer_dx, layer_dy] = chunk.layer_shift();
+    let moved = (moved.0 + layer_dx, moved.1 + layer_dy);
     let id = chunk.chunk.id();
     let mut entry = fl.chunks.entries.remove(&id).unwrap_or_default();
     let (dx, dy) = match entry.moved(chunk) {
@@ -645,7 +655,7 @@ fn draw(
         }
     };
     entry.last_used = fl.chunks.frame;
-    let shift = (dx - fl.origin.0, dy - fl.origin.1);
+    let shift = (dx + moved.0 - fl.origin.0, dy + moved.1 - fl.origin.1);
     if fl.chunks.recording > 0 {
         fl.chunks.drawn.push(id);
     }
@@ -703,7 +713,7 @@ fn draw(
                 else {
                     unreachable!("items index chunks");
                 };
-                self::draw(&inner, clip, z, alpha, fl, out);
+                self::draw(&inner, clip, z, alpha, moved, fl, out);
             }
         }
     }

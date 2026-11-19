@@ -67,6 +67,7 @@ mod layout;
 mod material;
 mod measure;
 mod pool;
+mod presence;
 mod render;
 mod router;
 mod scroll;
@@ -83,7 +84,8 @@ mod tests;
 
 pub use bounds::*;
 pub use cache::{
-    CacheKey, Cached, ElementCache, WindowFrameState, WindowSignals, cached, inputs_hash, reactive,
+    CacheKey, Cached, CachedLayer, ElementCache, WindowFrameState, WindowSignals, cached,
+    inputs_hash, reactive,
 };
 pub use canvas::*;
 pub use code_block::*;
@@ -100,6 +102,8 @@ pub use jump::{JumpChoice, JumpHints, JumpKey};
 pub use layout::*;
 pub use material::*;
 use measure::*;
+use presence::PresenceSlot;
+pub use presence::{PresenceIntegrityError, PresencePhase, PresenceTable, Transition};
 pub use render::*;
 pub use router::*;
 pub use scroll::*;
