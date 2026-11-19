@@ -1,6 +1,6 @@
 //! Pixel probes of text inside SVG icons (G11).
 
-use super::compositing_tests::{evidence, rect, renderer};
+use super::compositing::{evidence, rect, renderer};
 use super::*;
 use crate::scene::{IconPrimitive, RectPrimitive};
 use crate::text::test_text;

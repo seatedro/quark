@@ -2,7 +2,7 @@
 //! and pooled scratch targets of other sizes. The diagnosis of the frosted
 //! panel complaint (G17) rests on these.
 
-use super::compositing_tests::{draw, evidence, rect, renderer};
+use super::compositing::{draw, evidence, rect, renderer};
 use super::*;
 use crate::scene::{BlurRegionPrimitive, RectPrimitive};
 use quark::Color;

@@ -33,10 +33,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use quark::scene::ChunkPrimitive;
 
+use super::draw::{BandScratch, Draw, Drawn, convert, emit, path_parts};
 use super::{
-    ActiveClip, BandScratch, Draw, DrawKey, Drawn, FlattenedBlurRegion, FlattenedScene, Flattener,
-    PathInstance, PrimKind, Primitive, Rect, bounds_rect, convert, emit, path_parts, rect_union,
+    ActiveClip, DrawKey, FlattenedBlurRegion, FlattenedScene, Flattener, PrimKind, RoundedClip,
+    rect_union,
 };
+use crate::renderer::instances::PathInstance;
+use crate::scene::{Primitive, Rect};
 
 /// Frames a chunk may go undrawn before its entry is dropped. A recording
 /// alternates between two chunks while frames still hold the last one, so
@@ -125,9 +128,7 @@ enum Logged {
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Context {
     shift: (f32, f32),
-    scissor: Rect,
-    rounded_rect: Rect,
-    corner_radii: [f32; 4],
+    clip: ActiveClip,
     z: i32,
     alpha: f32,
 }
@@ -425,7 +426,7 @@ struct LocalClip {
     /// at the chunk's top level.
     scissor: Option<Rect>,
     /// The innermost rounded clip.
-    rounded: Option<(Rect, [f32; 4])>,
+    rounded: Option<RoundedClip>,
 }
 
 impl LocalClip {
@@ -441,14 +442,9 @@ impl LocalClip {
             None => rect,
             Some(scissor) => scissor.intersection(rect).unwrap_or_default(),
         };
-        let rounded = corner_radii.iter().any(|&r| r > 0.0);
         Self {
             scissor: Some(scissor),
-            rounded: if rounded {
-                Some((rect, corner_radii))
-            } else {
-                self.rounded
-            },
+            rounded: RoundedClip::new(rect, corner_radii).or(self.rounded),
         }
     }
 
@@ -459,14 +455,13 @@ impl LocalClip {
             None => outer.scissor,
             Some(scissor) => outer.scissor.intersection(scissor.offset(dx, dy))?,
         };
-        let (rounded_rect, corner_radii) = match self.rounded {
-            Some((rect, radii)) => (rect.offset(dx, dy), radii),
-            None => (outer.rounded_rect, outer.corner_radii),
-        };
+        let rounded = self.rounded.map(|rounded| RoundedClip {
+            rect: rounded.rect.offset(dx, dy),
+            ..rounded
+        });
         Some(ActiveClip {
             scissor,
-            rounded_rect,
-            corner_radii,
+            rounded: rounded.or(outer.rounded),
         })
     }
 }
@@ -607,17 +602,7 @@ fn items_bounds(items: &[Item]) -> Option<Rect> {
     for item in items {
         let extent = match &item.draw {
             ItemDraw::Chunk(_) => return None,
-            ItemDraw::Drawn(drawn) => match drawn {
-                Drawn::Quad(instance) => bounds_rect(instance.bounds),
-                Drawn::Shadow(instance) => bounds_rect(instance.draw_bounds),
-                Drawn::Effect(instance) => bounds_rect(instance.bounds),
-                Drawn::Image(image) => image.rect,
-                Drawn::Text(text) => text.rect,
-                Drawn::RichText(text) => text.rect,
-                Drawn::StyledText(text) => text.rect,
-                Drawn::Path { area, .. } => *area,
-                Drawn::Blur(blur) => blur.rect,
-            },
+            ItemDraw::Drawn(drawn) => drawn.extent(),
         };
         let finite = [extent.x, extent.y, extent.right(), extent.bottom()]
             .iter()
@@ -666,9 +651,7 @@ fn draw(
     }
     let context = Some(Context {
         shift,
-        scissor: outer.scissor,
-        rounded_rect: outer.rounded_rect,
-        corner_radii: outer.corner_radii,
+        clip: outer,
         z,
         alpha,
     });

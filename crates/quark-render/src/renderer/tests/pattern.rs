@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::compositing_tests::{evidence, rect, render};
+use super::compositing::{evidence, rect, render};
 use super::*;
 use crate::scene::{
     LineCap, Path, PathPrimitive, RectPrimitive, StripesPrimitive, StrokePattern, StrokeStyle,

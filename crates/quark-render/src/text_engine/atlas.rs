@@ -1572,10 +1572,6 @@ impl GlyphAtlas {
         self.stats.overflow_segments += 1;
     }
 
-    pub(crate) fn overflowing(&self) -> bool {
-        self.overflow.active
-    }
-
     /// The bind group drawing glyphs from color page `color` and mask page
     /// `mask` (either may be absent).
     pub(crate) fn bind_group(&mut self, color: Option<u32>, mask: Option<u32>) -> BindGroup {

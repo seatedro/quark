@@ -783,16 +783,8 @@ fn list_scene(rows: &[Arc<SceneChunk>], scroll: f32) -> Scene {
 /// batch, upload, prepare text, and encode, with the GPU work submitted
 /// outside the timing.
 fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> (u64, u64, u64) {
-    let (w, h) = (renderer.size.width, renderer.size.height);
-    // As `render` does; glyphs outside the viewport's resolution are culled.
-    renderer.viewport.update(
-        &renderer.queue,
-        Resolution {
-            width: w,
-            height: h,
-        },
-    );
-    let target = renderer.texture_pool.acquire(&renderer.device, w, h);
+    let (w, h) = renderer.surface.drawable_size().expect("a sized renderer");
+    let target = renderer.texture_pool.acquire(w, h);
     let view = renderer.texture_pool.view(&target).clone();
     let mut encoder = renderer
         .device
@@ -800,8 +792,7 @@ fn frame_cost(renderer: &mut Renderer, scene: &Scene, text: &mut TextSystem) -> 
     let started = Instant::now();
     let mut flattened = 0;
     let ((), allocations) = quark_ui::test_alloc::count(|| {
-        renderer.texture_pool.begin_frame();
-        renderer.instance_buffer_pool.begin_frame();
+        renderer.begin_frame(0.0);
         renderer.flatten(scene, w, h);
         flattened = started.elapsed().as_micros() as u64;
         renderer

@@ -33,7 +33,10 @@ use crate::text_engine::{
 };
 use quark_text::{TextLayout, TextSystem};
 
-use super::{ClippedRichText, ClippedText, Renderer, TargetFrame, TextRunItems};
+use super::Renderer;
+use super::batches::TextRunItems;
+use super::flatten::{ClippedRichText, ClippedText};
+use super::frame::TargetFrame;
 use crate::text::{
     RowOffsets, TextPath, prepare_text_areas, push_positioned_glyphs, visit_positioned_glyphs,
 };
@@ -396,10 +399,57 @@ fn can_move(index: usize) -> bool {
     index < MAX_DRAW_OFFSETS - 1
 }
 
+/// How a frame's text draws, as preparing its glyphs found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrameText {
+    /// Every glyph is resident in the atlas: text steps draw in their pass.
+    Resident,
+    /// The glyphs overflowed the atlas, which hands those not resident out
+    /// of its overflow pages, ordinal by ordinal: passes split wherever a
+    /// run needs the next ordinal's uploads. `reached` is the ordinal whose
+    /// uploads the passes recorded so far have copied.
+    Overflow { reached: u32 },
+    /// Not even the overflow pages hold the glyphs: the frame draws without
+    /// text.
+    Skipped,
+}
+
 impl Renderer {
+    /// Prepare every text run of `frames`, retrying in overflow mode when
+    /// the frame's glyphs do not fit the atlas. On the positioned path the
+    /// vertices still need uploading.
+    pub(super) fn prepare_frame_text(
+        &mut self,
+        frames: &[TargetFrame],
+        text: &mut TextSystem,
+    ) -> FrameText {
+        self.atlas.begin_frame(text);
+        self.glyph_owner.adopt(text, &mut self.recolored);
+        if self.text_path == TextPath::Buffer {
+            self.recolored
+                .prepare(frames.iter().map(|frame| &frame.flat.rich_texts[..]), text);
+        }
+        if self.prepare_text_runs(frames, text, true).is_ok() {
+            return FrameText::Resident;
+        }
+        // The frame's pinned glyphs fill the atlas's hard limit. Draw it in
+        // overflow mode: glyphs not resident pass through reusable overflow
+        // pages, in encode order.
+        self.atlas.begin_overflow();
+        self.text_runs.forget();
+        match self.prepare_text_runs_in_order(frames, text) {
+            Ok(()) => FrameText::Overflow { reached: 0 },
+            Err(error) => {
+                tracing::warn!("skipping text for one frame: {error}");
+                self.text_runs.forget();
+                FrameText::Skipped
+            }
+        }
+    }
+
     /// Prepare every text run of `frames`, drawing the vertices a renderer
     /// already holds for an unchanged run when `reuse` allows it.
-    pub(super) fn prepare_text_runs(
+    fn prepare_text_runs(
         &mut self,
         frames: &[TargetFrame],
         text: &mut TextSystem,
@@ -458,10 +508,7 @@ impl Renderer {
         if reuse {
             let mut index = 0;
             for (target, frame) in frames.iter().enumerate() {
-                let resolution = match target {
-                    0 => self.viewport.resolution(),
-                    i => self.layer_viewports[i - 1].resolution(),
-                };
+                let resolution = self.viewports.glyphs(target).resolution();
                 for run in &frame.batches.text_runs {
                     let runs = &mut self.text_runs;
                     let candidate = (runs.slots[index] == usize::MAX)
@@ -502,7 +549,7 @@ impl Renderer {
         // kept vertices included: a moving shimmer only rewrites its fills.
         let mut index = 0;
         for frame in frames {
-            let format = self.target_format(frame.encoded);
+            let format = self.gpu.target_format(frame.encoded);
             for run in &frame.batches.text_runs {
                 let runs = &mut self.text_runs;
                 let slot = runs.slots[index];
@@ -560,7 +607,7 @@ impl Renderer {
     /// encoded (the last target first), for a frame in overflow mode: its
     /// glyphs go through the overflow pages ordinal by ordinal, so runs
     /// must take them in the order their draws run.
-    pub(super) fn prepare_text_runs_in_order(
+    fn prepare_text_runs_in_order(
         &mut self,
         frames: &[TargetFrame],
         text: &mut TextSystem,
@@ -583,7 +630,7 @@ impl Renderer {
         }
         let mut index = 0;
         for frame in frames {
-            let format = self.target_format(frame.encoded);
+            let format = self.gpu.target_format(frame.encoded);
             for run in &frame.batches.text_runs {
                 let runs = &mut self.text_runs;
                 let slot = runs.slots[index];
@@ -615,10 +662,7 @@ impl Renderer {
         text: &mut TextSystem,
     ) -> Result<(), PrepareError> {
         let (texts, rich_texts) = run_items(frame, run);
-        let viewport = match target {
-            0 => &self.viewport,
-            i => &self.layer_viewports[i - 1],
-        };
+        let viewport = self.viewports.glyphs(target);
         let runs = &mut self.text_runs;
         let memo = &mut runs.memos[slot];
         memo.forget();

@@ -147,14 +147,7 @@ fn report(label: &str, configure: impl Fn(&mut Renderer)) {
             if frame >= 5 {
                 times.push(start.elapsed().as_secs_f64() * 1000.0);
             }
-            pool_bytes = pool_bytes.max(
-                renderer
-                    .texture_pool
-                    .textures
-                    .iter()
-                    .map(|t| u64::from(t.width) * u64::from(t.height) * 4)
-                    .sum(),
-            );
+            pool_bytes = pool_bytes.max(renderer.texture_pool.pooled_bytes());
         }
         times.sort_by(f64::total_cmp);
         let target = u64::from(w) * u64::from(h) * 4;

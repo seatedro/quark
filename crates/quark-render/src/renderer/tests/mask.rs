@@ -1,6 +1,6 @@
 //! Pixel probes of alpha masks on isolated groups (edge fades).
 
-use super::compositing_tests::{evidence, rect, render};
+use super::compositing::{evidence, rect, render};
 use super::*;
 use crate::scene::{AlphaMask, FadeEdge, LayerPrimitive, RectPrimitive};
 use quark::Color;

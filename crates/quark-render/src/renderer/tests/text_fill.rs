@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use super::compositing_tests::{evidence, rect, render, renderer};
+use super::compositing::{evidence, rect, render, renderer};
 use super::*;
 use crate::scene::{
     RectPrimitive, ShapedText, ShimmerSpec, StyledTextPrimitive, TextFill, TextGradient,
@@ -160,7 +160,7 @@ fn advancing_shimmer_phase_allocates_nothing() {
     let (ready, allocated) =
         quark_ui::test_alloc::count(|| renderer.prepare_frame_text(&frames[..active], &mut text));
     renderer.frames = frames;
-    assert!(ready);
+    assert_eq!(ready, FrameText::Resident);
     assert_eq!(allocated, 0);
     assert_eq!(renderer.text_atlas_stats().misses, misses);
 }
