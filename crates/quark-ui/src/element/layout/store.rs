@@ -139,14 +139,14 @@ impl<K: RowKey> KeyedRows<K> {
         row
     }
 
-    /// Start the next pass, evicting the rows unclaimed for
-    /// [`EVICT_AFTER_PASSES`] passes. Each goes as `Vec::swap_remove`
-    /// removes it, the last row moving into its place; `evict(row)` removes
-    /// it from the owner's columns the same way.
-    pub(super) fn next_pass(&mut self, mut evict: impl FnMut(usize)) {
+    /// Start the next pass, evicting the rows unclaimed for more than
+    /// `evict_after` passes. Each goes as `Vec::swap_remove` removes it,
+    /// the last row moving into its place; `evict(row)` removes it from
+    /// the owner's columns the same way.
+    pub(super) fn next_pass(&mut self, evict_after: u64, mut evict: impl FnMut(usize)) {
         if self.claimed < self.key.len() {
             for row in (0..self.key.len()).rev() {
-                if self.last_pass[row] + EVICT_AFTER_PASSES < self.pass {
+                if self.last_pass[row] + evict_after < self.pass {
                     self.swap_remove(row);
                     evict(row);
                 }
@@ -274,7 +274,7 @@ impl NodeStore {
             spare,
             owner,
         } = self;
-        rows.next_pass(|row| {
+        rows.next_pass(EVICT_AFTER_PASSES, |row| {
             let evicted = node.swap_remove(row);
             if let Some(&moved) = node.get(row) {
                 owner[slot(moved)] = Owner::Row(row as u32);

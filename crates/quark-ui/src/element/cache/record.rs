@@ -438,6 +438,7 @@ impl Recording {
             font,
             accessibility,
             reusable: complete && self.volatile == 0 && !pointer_inside,
+            recording: next_recording_id(),
         };
         cache.inherited[row] = Inherited {
             z: self.z,

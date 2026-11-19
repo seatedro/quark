@@ -162,6 +162,16 @@ struct EntryInputs {
     accessibility: bool,
     /// The entry holds a complete recording that may replay.
     reusable: bool,
+    /// Monotonic id of the build that wrote this entry's measure memo, so
+    /// layout can tell whether a replayed boundary's memo changed without
+    /// double-buffering the memo vector.
+    recording: u64,
+}
+
+pub(super) fn next_recording_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The window's element cache: one row per [`cached`] boundary, stored
@@ -269,6 +279,7 @@ impl ElementCache {
                 font,
                 accessibility,
                 reusable: false,
+                recording: 0,
             });
             self.inherited.push(Inherited::default());
             self.hit_extent.push(None);
@@ -482,6 +493,9 @@ pub struct Cached<F> {
     /// The boundary's own box in its parent; only `layout` is used.
     style: ElementStyle,
     fill_height: bool,
+    /// Paint-time offset applied to the boundary's bounds, outside layout
+    /// and outside the cached recording.
+    translate: (f32, f32),
     /// The key whose animated layer the output is drawn through.
     layer: Option<AnimKey>,
     build: Option<F>,
@@ -549,6 +563,13 @@ impl<F> Cached<F> {
         self
     }
 
+    /// Shift the boundary's bounds at prepaint and paint time without
+    /// changing its layout or invalidating its recording.
+    pub fn translate(mut self, x: f32, y: f32) -> Self {
+        self.translate = (x, y);
+        self
+    }
+
     /// The inputs hash, mixed with what every entry depends on that the
     /// caller does not hash: the inspector's style overrides, which apply
     /// to elements inside the subtree while it builds.
@@ -573,6 +594,7 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Cached<F> {
             hash,
             style: ElementStyle::default(),
             fill_height: false,
+            translate: (0.0, 0.0),
             layer: None,
             build: Some(build),
             state: State::Idle,
@@ -718,6 +740,7 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
                     &cache.memo[row as usize],
                     row,
                     self.key,
+                    cache.inputs[row as usize].recording,
                 );
                 self.state = State::Replay { row };
                 return (id, ());
@@ -754,6 +777,11 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
         engine: &LayoutEngine,
         cx: &mut ElementContext,
     ) -> CachedLayer {
+        let bounds = Bounds {
+            x: bounds.x + self.translate.0,
+            y: bounds.y + self.translate.1,
+            ..bounds
+        };
         // Outside the recording: the layer is not part of the output.
         let layer = self
             .layer
@@ -782,6 +810,11 @@ impl<F: FnOnce(&ElementContext) -> AnyElement + 'static> Element for Cached<F> {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        let bounds = Bounds {
+            x: bounds.x + self.translate.0,
+            y: bounds.y + self.translate.1,
+            ..bounds
+        };
         if let Some(matrix) = layered.matrix {
             cx.push_paint_transform(matrix);
         }

@@ -21,7 +21,11 @@ pub(in crate::element) enum NodeMeasure {
     /// A cache boundary replayed from the cache: it answers the measure
     /// queries recorded with it, `memo[range]`, and flags `slot` stale on
     /// any other query.
-    Replay { memo: Range<usize>, slot: u32 },
+    Replay {
+        memo: Range<usize>,
+        slot: u32,
+        recording: u64,
+    },
 }
 
 /// What measured text borrows while layout computes: the window's text

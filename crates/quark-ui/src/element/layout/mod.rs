@@ -201,16 +201,15 @@ pub struct LayoutEngine {
     /// Children ids of the containers being built, as a stack, so a
     /// container passes its children to taffy without a vector of its own.
     child_ids: Vec<LayoutId>,
-    /// Cache-boundary subtrees, retained by their boundaries' keys.
+    /// Cache-boundary subtrees, retained by their boundaries' keys for one
+    /// pass. Entries `0..subtree_rows.len()` are live; the tail up to
+    /// `SPARE_SUBTREES` entries past that are idle spares reused in place.
     subtree_rows: KeyedRows<CacheKey>,
     subtrees: Vec<Subtree>,
-    /// Subtrees of evicted rows, which new boundaries take.
-    spare_subtrees: Vec<Subtree>,
     /// Rows of the subtrees this pass claimed.
     live_subtrees: Vec<u32>,
-    /// Measure memos of replayed boundaries this pass, and the last pass's.
+    /// Measure memos of replayed boundaries this pass.
     replay_memo: Vec<MeasureMemo>,
-    last_replay_memo: Vec<MeasureMemo>,
     /// Cache slots whose replayed memo missed a query this frame.
     stale: Vec<u32>,
     /// Device pixels per point of the last pass.
@@ -255,10 +254,8 @@ impl LayoutEngine {
             child_ids: Vec::new(),
             subtree_rows: KeyedRows::new(),
             subtrees: Vec::new(),
-            spare_subtrees: Vec::new(),
             live_subtrees: Vec::new(),
             replay_memo: Vec::new(),
-            last_replay_memo: Vec::new(),
             stale: Vec::new(),
             scale: 1.0,
         }
@@ -328,17 +325,20 @@ impl LayoutEngine {
         }
         match (context, tree.get_node_context_mut(node)) {
             (Context::None, None) => {}
-            // A replay answering from the memo it answered from last pass
-            // answers as it did; only the memo's place in the buffer moved.
+            // The same recording answers from the same memo; only its place in
+            // this pass's memo buffer moved.
             (
-                Context::Replay { memo, slot },
+                Context::Replay {
+                    memo,
+                    slot,
+                    recording,
+                },
                 Some(NodeMeasure::Replay {
                     memo: old,
                     slot: old_slot,
+                    recording: old_recording,
                 }),
-            ) if continuous
-                && self.last_replay_memo.get(old.clone()) == self.replay_memo.get(memo.clone()) =>
-            {
+            ) if continuous && *old_recording == recording => {
                 *old = memo;
                 *old_slot = slot;
             }
@@ -416,9 +416,11 @@ impl LayoutEngine {
         let row = match self.subtree_rows.claim(key) {
             Claim::Row { row, .. } => row,
             Claim::Vacant(probed) => {
-                let sub = self.spare_subtrees.pop().unwrap_or_else(Subtree::new);
-                self.subtrees.push(sub);
-                self.subtree_rows.push(probed)
+                let row = self.subtree_rows.push(probed);
+                if row == self.subtrees.len() {
+                    self.subtrees.push(Subtree::new());
+                }
+                row
             }
         };
         self.subtrees[row].begin(key);
@@ -468,6 +470,7 @@ impl LayoutEngine {
         memo: &[MeasureMemo],
         slot: u32,
         key: CacheKey,
+        recording: u64,
     ) -> LayoutId {
         let start = self.replay_memo.len();
         self.replay_memo.extend_from_slice(memo);
@@ -477,7 +480,11 @@ impl LayoutEngine {
             key,
             &style,
             Children::Slice(&[]),
-            Context::Replay { memo, slot },
+            Context::Replay {
+                memo,
+                slot,
+                recording,
+            },
         )
     }
 
@@ -544,7 +551,7 @@ impl LayoutEngine {
                 Some(NodeMeasure::Measure(f)) => f(known, available),
                 Some(NodeMeasure::Text(text)) => text.measure(known, available, cx),
                 Some(NodeMeasure::Subtree(index)) => subtrees[*index].measure(known, available, cx),
-                Some(NodeMeasure::Replay { memo, slot }) => {
+                Some(NodeMeasure::Replay { memo, slot, .. }) => {
                     find_memo(&replay_memo[memo.clone()], known, available).unwrap_or_else(|| {
                         stale.push(*slot);
                         taffy::Size::ZERO
@@ -681,20 +688,20 @@ impl LayoutEngine {
         let Self {
             subtree_rows,
             subtrees,
-            spare_subtrees,
             ..
         } = self;
-        subtree_rows.next_pass(|row| {
-            let sub = subtrees.swap_remove(row);
-            if spare_subtrees.len() < SPARE_SUBTREES {
-                spare_subtrees.push(sub);
+        let mut active = subtree_rows.len();
+        subtree_rows.next_pass(0, |row| {
+            active -= 1;
+            subtrees.swap(row, active);
+            if subtrees.len() - active > SPARE_SUBTREES {
+                subtrees.pop();
             }
         });
         self.live_subtrees.clear();
         self.scopes.clear();
         self.scopes.push(Scope::ROOT);
         self.child_ids.clear();
-        std::mem::swap(&mut self.replay_memo, &mut self.last_replay_memo);
         self.replay_memo.clear();
         self.stale.clear();
         debug_assert_eq!(self.verify_integrity(), Ok(()));
@@ -707,12 +714,13 @@ impl LayoutEngine {
     pub fn verify_integrity(&self) -> Result<(), LayoutIntegrityError> {
         self.nodes.verify_integrity(&self.tree)?;
         self.subtree_rows.verify_integrity("subtrees")?;
-        if self.subtrees.len() != self.subtree_rows.len() {
+        let active = self.subtree_rows.len();
+        if self.subtrees.len() < active || self.subtrees.len() - active > SPARE_SUBTREES {
             return Err(LayoutIntegrityError::ColumnLength {
                 table: "subtrees",
                 column: "subtree",
                 len: self.subtrees.len(),
-                rows: self.subtree_rows.len(),
+                rows: active,
             });
         }
         let live = |&row: &u32| self.subtree_rows.is_claimed(row as usize);
@@ -752,7 +760,11 @@ enum Context {
     None,
     Measure(NodeMeasure),
     Subtree(usize),
-    Replay { memo: Range<usize>, slot: u32 },
+    Replay {
+        memo: Range<usize>,
+        slot: u32,
+        recording: u64,
+    },
 }
 
 impl Context {
@@ -761,7 +773,15 @@ impl Context {
             Self::None => None,
             Self::Measure(measure) => Some(measure),
             Self::Subtree(index) => Some(NodeMeasure::Subtree(index)),
-            Self::Replay { memo, slot } => Some(NodeMeasure::Replay { memo, slot }),
+            Self::Replay {
+                memo,
+                slot,
+                recording,
+            } => Some(NodeMeasure::Replay {
+                memo,
+                slot,
+                recording,
+            }),
         }
     }
 }

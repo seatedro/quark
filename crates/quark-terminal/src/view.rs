@@ -291,24 +291,21 @@ fn build(
         let (grid, row_text) = (grid.clone(), row_text.clone());
         let hash = inputs_hash(&(row.hash, grid.colors, m.cell, palette));
         rows = rows.child(
-            div()
-                .absolute()
-                .left(0.0)
-                .top(0.0)
-                .translate(0.0, m.points(i as i32 * m.cell.cell_height as i32))
-                .child(
-                    cached(key, hash, move || {
-                        canvas(move |bounds, scene, cx| {
-                            let row = &grid.rows[i];
-                            let mut row_text = row_text.borrow_mut();
-                            paint_row(bounds, scene, cx, row, &mut row_text, &m, palette);
-                        })
-                        .w(grid_w)
-                        .h(m.cell_h)
-                    })
-                    .w(grid_w)
-                    .h(m.cell_h),
-                ),
+            cached(key, hash, move || {
+                canvas(move |bounds, scene, cx| {
+                    let row = &grid.rows[i];
+                    let mut row_text = row_text.borrow_mut();
+                    paint_row(bounds, scene, cx, row, &mut row_text, &m, palette);
+                })
+                .w(grid_w)
+                .h(m.cell_h)
+            })
+            .absolute()
+            .left(0.0)
+            .top(0.0)
+            .w(grid_w)
+            .h(m.cell_h)
+            .translate(0.0, m.points(i as i32 * m.cell.cell_height as i32)),
         );
     }
     if let Some(Screen {
