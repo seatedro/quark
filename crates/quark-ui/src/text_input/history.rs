@@ -22,7 +22,7 @@ impl PromptHistory {
     fn browsing(&self, editor: &Editor, entries: &[RichText]) -> Option<usize> {
         let at = self.position?;
         let entry = entries.get(at)?;
-        (entry.text == editor.text() && entry.atoms == editor.atoms()).then_some(at)
+        (*editor.rope() == *entry.text.as_str() && entry.atoms == editor.atoms()).then_some(at)
     }
 
     fn caret_at(editor: &Editor, end: bool) -> bool {

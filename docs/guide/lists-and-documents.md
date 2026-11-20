@@ -86,8 +86,11 @@ supplies a `quark_ui::document::CodeHighlighter`, through
 - Blocks with an unchanged version are reused as they are, so every new
   result needs a distinct version.
 - `SyntaxTone` colors come from the theme's `syntax_*` colors.
-- The text editor has its own synchronous hook,
-  `text_input::SyntaxHighlighter`.
+- The text editor has its own synchronous hooks: `text_input::LineHighlighter`
+  highlights a line at a time with state carried between lines, so an edit
+  re-highlights only the lines it changed and the editor highlights only up
+  to the view; `text_input::SyntaxHighlighter` gets the whole text up to
+  256 KiB and the lines around the view past that.
 
 ## Selection
 

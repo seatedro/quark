@@ -3,86 +3,44 @@
 //! The app, its messages, signals, theme, and key bindings are the
 //! adapter's and shared by every window.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use quark::Rect;
-use quark::hit::HitId;
 use quark::scene::Scene;
 use quark_ui::FocusId;
 use quark_ui::accessibility::{AccessibilityFrame, Announcer};
 use quark_ui::animation::{AnimationTable, PresenceTable};
 use quark_ui::element::{
-    DragPreviewLayer, ElementCache, ElementHandles, ImeTarget, InputFrame, InputRouter, JumpHints,
+    DragPreviewLayer, ElementCache, ElementHandles, ImeTarget, InputFrame, InputRouter,
     TextInputHitArea, TooltipRegion,
 };
 use quark_ui::text_input::TextPointer;
-use winit::window::CursorIcon;
 
-use super::HoveredTooltip;
+use super::focus::FocusState;
+use super::ime::ImeState;
+use super::jump::JumpState;
+use super::pointer::PointerState;
 use crate::WindowHandle;
+use crate::platform::material::MaterialRect;
 
-/// The platform IME's composition, as IME events and focus left it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Composition {
-    None,
-    /// Composing in this element, focused when its preedit began, until
-    /// the commit ends it.
-    Owned(FocusId),
-    /// Focus left the element composing. Until the next frame resets the
-    /// platform IME, events still arriving for that composition are
-    /// dropped.
-    Orphaned,
-}
-
-#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub(crate) struct WindowUiState {
     /// Names the accessibility tree's window node; the adapter's name when
     /// unset.
     pub(super) name: Option<String>,
-    pub(super) focus: Option<FocusId>,
-    /// Whether focus shows its ring (`ElementContext::focus_visible`):
-    /// the last input that could move focus was a key or assistive tech,
-    /// not a pointer press. App code moving focus keeps it as is, as
-    /// programmatic focus in browsers follows the last input.
-    pub(super) focus_visible: bool,
-    /// Focus as the adapter last settled it, to notice focus that moved to
-    /// an element of this window.
-    pub(super) focus_seen: Option<FocusId>,
-    pub(super) pointer: Option<(f32, f32)>,
-    /// Hit entries under the pointer in the routed frame, topmost first:
-    /// what hover styles were painted from.
-    pub(super) hovered: Vec<HitId>,
-    /// The cursor last shown over this window.
-    pub(super) cursor: CursorIcon,
+    pub(super) focus: FocusState,
+    pub(super) pointer: PointerState,
     /// Routes input through the last painted frame until the next replaces
     /// it.
     pub(super) router: InputRouter,
     /// Handles the app names this window's elements with.
     pub(super) element_handles: ElementHandles,
-    /// A drag out took the pointer, or the app cancelled the drag, during
-    /// the last call into the app.
-    pub(super) pointer_taken: bool,
     /// Paints the preview of the drag holding the pointer, or of the drag
     /// session over this window.
     pub(super) drag_preview: DragPreviewLayer,
-    pub(super) jump: JumpHints,
-    /// The last input was a key press jump mode took, so the text it
-    /// types, which comes next, goes nowhere.
-    pub(super) jump_took_key: bool,
+    pub(super) jump: JumpState,
     pub(super) accessibility: AccessibilityFrame,
     pub(super) announcer: Announcer,
     /// Text fields of the last frame, for pointer selection and IME.
     pub(super) text_areas: Vec<TextInputHitArea>,
     pub(super) text_pointer: TextPointer,
-    /// The focused text field as of the last input, to cancel its
-    /// composition once focus leaves it.
-    pub(super) edit_focus: Option<FocusId>,
-    /// IME state last sent to the window.
-    pub(super) ime_allowed: bool,
-    pub(super) ime_area: Option<Rect>,
-    /// The platform IME's composition and the element it belongs to.
-    pub(super) composition: Composition,
+    pub(super) ime: ImeState,
     /// Scale factor of the last painted frame, for accessibility bounds.
     pub(super) scale_factor: f32,
     pub(super) animations: AnimationTable,
@@ -90,187 +48,47 @@ pub(crate) struct WindowUiState {
     pub(super) presence: PresenceTable,
     /// Cached subtrees and the layout engine, reused every frame.
     pub(super) element_cache: ElementCache,
-    /// Buffers of the frame before last, reused by the next frame: the
-    /// scene the runner handed back, the input frame routing let go of,
-    /// the text input areas, the IME targets, and the accessibility frame.
-    pub(super) spare_scene: Scene,
-    pub(super) spare_accessibility: AccessibilityFrame,
-    pub(super) spare_input: InputFrame,
-    pub(super) spare_text_areas: Vec<TextInputHitArea>,
-    pub(super) spare_ime_targets: Vec<ImeTarget>,
-    /// Last frame's tooltip regions, reused by the next frame.
-    pub(super) spare_tooltip_regions: Vec<TooltipRegion>,
-    pub(super) tooltip: TooltipHover,
-    /// The last press on window drag chrome, to tell a double-click.
-    pub(super) title_press: TitlePress,
+    pub(super) spare: Spares,
     /// The material regions last handed to the window.
-    pub(super) material_regions: Vec<crate::platform::material::MaterialRect>,
+    pub(super) material_regions: Vec<MaterialRect>,
     #[cfg(feature = "devtools")]
     pub(super) devtools: quark_ui::inspector::Devtools,
 }
 
-/// The tooltip region under the pointer.
-#[derive(Debug, Default)]
-pub(super) struct TooltipHover {
-    pub(super) current: Option<HoveredTooltip>,
-    /// The region a press hid its tooltip in: hidden until the pointer
-    /// leaves it.
-    pressed: Option<(Arc<str>, Rect)>,
-}
-
-impl TooltipHover {
-    /// Follow `pointer` over `regions`, in paint order. True when the
-    /// hovered tooltip changed.
-    pub(super) fn update(
-        &mut self,
-        regions: &[TooltipRegion],
-        pointer: Option<(f32, f32)>,
-        now: Duration,
-    ) -> bool {
-        let Some((x, y)) = pointer else {
-            self.pressed = None;
-            return self.current.take().is_some();
-        };
-        // A child's region comes after its parent's.
-        let region = regions.iter().rev().find(|t| t.bounds.contains(x, y));
-        let is = |text: &Arc<str>, bounds: Rect| {
-            region.is_some_and(|r| r.text == *text && r.bounds == bounds)
-        };
-        if let Some((text, bounds)) = &self.pressed {
-            if is(text, *bounds) {
-                return false;
-            }
-            self.pressed = None;
-        }
-        if let Some(current) = &self.current
-            && is(&current.text, current.bounds)
-        {
-            return false;
-        }
-        let next = region.map(|r| HoveredTooltip {
-            text: r.text.clone(),
-            bounds: r.bounds,
-            pointer: (x, y),
-            since: now,
-        });
-        let changed = next.is_some() || self.current.is_some();
-        self.current = next;
-        changed
-    }
-
-    /// Hide the tooltip until the pointer leaves its region. True when one
-    /// was showing.
-    pub(super) fn press(&mut self) -> bool {
-        let Some(current) = self.current.take() else {
-            return false;
-        };
-        self.pressed = Some((current.text, current.bounds));
-        true
-    }
-}
-
-/// Presses on app-drawn title chrome, told apart into drags and the
-/// double-clicks that zoom or minimize the window.
-#[derive(Debug, Default)]
-pub(super) struct TitlePress {
-    last: Option<(Duration, (f32, f32))>,
-    /// A press held on the chrome whose window move waits for the pointer
-    /// to move ([`DEFER_CHROME_DRAG`]).
-    held: Option<(f32, f32)>,
-}
-
-/// Whether a press on title chrome moves the window only once the pointer
-/// moves. X11 window managers grab the pointer for a move as soon as asked
-/// and, when the release beat the request there, keep moving until the
-/// next one, swallowing a double-click's second press; GTK waits for the
-/// drag threshold on Wayland and X11 alike. AppKit and Windows want the
-/// press itself.
-pub(super) const DEFER_CHROME_DRAG: bool = cfg!(target_os = "linux");
-
-impl TitlePress {
-    /// The longest gap between a double-click's presses: the default on
-    /// macOS, Windows, and GNOME.
-    const INTERVAL: Duration = Duration::from_millis(500);
-    /// How far apart a double-click's presses may be, in points.
-    const SLOP: f32 = 4.0;
-
-    /// A press at `at` and time `now`: whether it completes a double-click.
-    /// The press after a double-click starts over.
-    pub(super) fn press(&mut self, now: Duration, at: (f32, f32)) -> bool {
-        let double = self.last.is_some_and(|(then, (x, y))| {
-            now.saturating_sub(then) <= Self::INTERVAL
-                && (x - at.0).abs() <= Self::SLOP
-                && (y - at.1).abs() <= Self::SLOP
-        });
-        self.last = (!double).then_some((now, at));
-        double
-    }
-
-    /// A press elsewhere: the next press on the chrome is a first one.
-    pub(super) fn reset(&mut self) {
-        self.last = None;
-        self.held = None;
-    }
-
-    /// Wait for the pointer to move before moving the window.
-    pub(super) fn hold(&mut self, at: (f32, f32)) {
-        self.held = Some(at);
-    }
-
-    /// The pointer moved to `at`: whether a held press has now moved far
-    /// enough to be a window move.
-    pub(super) fn moved(&mut self, at: (f32, f32)) -> bool {
-        let far = self
-            .held
-            .is_some_and(|(x, y)| (x - at.0).abs() > Self::SLOP || (y - at.1).abs() > Self::SLOP);
-        if far {
-            self.held = None;
-        }
-        far
-    }
-
-    /// The button was released.
-    pub(super) fn release(&mut self) {
-        self.held = None;
-    }
+/// Buffers of the frame before last, reused by the next frame: the scene
+/// the runner handed back, the input frame routing let go of, the text
+/// input areas, the IME targets, and the accessibility frame.
+#[derive(Default)]
+pub(super) struct Spares {
+    pub(super) scene: Scene,
+    pub(super) accessibility: AccessibilityFrame,
+    pub(super) input: InputFrame,
+    pub(super) text_areas: Vec<TextInputHitArea>,
+    pub(super) ime_targets: Vec<ImeTarget>,
+    /// Last frame's tooltip regions, reused by the next frame.
+    pub(super) tooltip_regions: Vec<TooltipRegion>,
 }
 
 impl WindowUiState {
     pub(super) fn new() -> Self {
         Self {
             name: None,
-            focus: None,
-            focus_visible: true,
-            focus_seen: None,
-            pointer: None,
-            hovered: Vec::new(),
-            cursor: CursorIcon::Default,
+            focus: FocusState::default(),
+            pointer: PointerState::default(),
             router: InputRouter::default(),
             element_handles: ElementHandles::default(),
-            pointer_taken: false,
             drag_preview: DragPreviewLayer::default(),
-            jump: JumpHints::default(),
-            jump_took_key: false,
+            jump: JumpState::default(),
             accessibility: AccessibilityFrame::default(),
             announcer: Announcer::default(),
             text_areas: Vec::new(),
             text_pointer: TextPointer::default(),
-            edit_focus: None,
-            ime_allowed: false,
-            ime_area: None,
-            composition: Composition::None,
+            ime: ImeState::default(),
             scale_factor: 1.0,
             animations: AnimationTable::new(),
             presence: PresenceTable::new(),
             element_cache: ElementCache::new(),
-            spare_scene: Scene::default(),
-            spare_accessibility: AccessibilityFrame::default(),
-            spare_input: Default::default(),
-            spare_text_areas: Vec::new(),
-            spare_ime_targets: Vec::new(),
-            spare_tooltip_regions: Vec::new(),
-            tooltip: TooltipHover::default(),
-            title_press: TitlePress::default(),
+            spare: Spares::default(),
             material_regions: Vec::new(),
             #[cfg(feature = "devtools")]
             devtools: quark_ui::inspector::Devtools::from_env(),
@@ -279,8 +97,34 @@ impl WindowUiState {
 
     /// The focused text field, if focus is on one painted last frame.
     pub(super) fn focused_field(&self) -> Option<FocusId> {
-        self.focus
+        (self.focus.current)
             .filter(|focus| self.text_areas.iter().any(|a| a.focus_target == *focus))
+    }
+}
+
+/// What [`crate::testing`] reads of a window.
+#[cfg(feature = "test-support")]
+impl WindowUiState {
+    pub(crate) fn accessibility_frame(&self) -> &AccessibilityFrame {
+        &self.accessibility
+    }
+
+    pub(crate) fn semantic_frame(&self) -> &quark::SemanticFrame {
+        &self.router.frame().semantic
+    }
+
+    pub(crate) fn geometry(&self) -> &quark_ui::element::LayoutSnapshot {
+        &self.router.frame().geometry
+    }
+
+    pub(crate) fn focus(&self) -> Option<FocusId> {
+        self.focus.current
+    }
+
+    /// The semantic node of the topmost hit region at a point that has one.
+    pub(crate) fn semantic_node_at(&self, x: f32, y: f32) -> Option<usize> {
+        let hits = &self.router.frame().hits;
+        hits.stack_at(x, y).into_iter().find_map(|id| hits.node(id))
     }
 }
 

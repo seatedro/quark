@@ -16,10 +16,11 @@ use std::any::Any;
 use quark_ui::Action;
 use quark_ui::element::{
     DragEnd, DragLocation, DragOutcome, DragSession, DragWindowId, DropPolicy, DropTargetHit,
-    DropTargetId, DropTargets,
+    DropTargetId, DropTargets, HandoffError,
 };
 
 use super::window::WindowStates;
+use super::{Redraw, UiContext, redraw};
 use crate::{EventContext, WindowHandle};
 
 /// How drag sessions name `window`.
@@ -41,6 +42,122 @@ pub(super) struct ActiveDrag {
     pub(super) source: Option<WindowHandle>,
 }
 
+impl UiContext<'_, '_> {
+    /// The drag the app holds across windows, if one is under way. See
+    /// [`DragSession`].
+    pub fn drag_session(&self) -> Option<&DragSession> {
+        self.shared.drag.as_ref().map(|active| &active.session)
+    }
+
+    /// The window the drag session started in, while it is open.
+    pub fn drag_source(&self) -> Option<WindowHandle> {
+        self.shared.drag.as_ref().and_then(|active| active.source)
+    }
+
+    /// The window a [`DragLocation`] names, if it is open.
+    pub fn drag_window(&self, location: DragLocation) -> Option<WindowHandle> {
+        match location {
+            DragLocation::Window { window, .. } => window_of(&self.windows, window),
+            DragLocation::Outside | DragLocation::Unknown => None,
+        }
+    }
+
+    /// Move the drag holding this window's pointer into the drag session
+    /// ([`quark_ui::element::InputRouter::hand_off_capture`]), so it can
+    /// follow the pointer into other windows; its handler must agree
+    /// ([`quark_ui::element::DragHandler::on_handoff`]). The session starts
+    /// over this window at the pointer; a session already under way ends
+    /// cancelled. Window blur no longer cancels the drag: move it with
+    /// [`Self::update_drag`] and end it with [`Self::finish_drag`].
+    pub fn hand_off_drag(&mut self) -> Result<(), HandoffError> {
+        let window = self.windows.handle.ok_or(HandoffError::NoCapture)?;
+        let (session, delivery) = self
+            .windows
+            .current
+            .router
+            .hand_off_capture(drag_window_id(window))?;
+        let shared = &mut *self.shared;
+        shared.queued.extend(delivery.actions);
+        if let Some(end) = start(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            session,
+        ) {
+            shared.ended.push(end);
+        }
+        redraw(Redraw::Action, Some(window), self.window);
+        Ok(())
+    }
+
+    /// Start `session`, a drag no window's router holds: a keyboard move,
+    /// or one a native transport began. Name its source with
+    /// [`drag_window_id`]. Returns the session it replaced, cancelled.
+    pub fn start_drag(&mut self, session: DragSession) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        start(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            session,
+        )
+    }
+
+    /// The session's pointer moved to `location` ([`drag_location`] for a
+    /// point over one of the app's windows): resolve it against that
+    /// window's last completed drop targets and `policy`, and show the
+    /// preview there. Returns what a release now would do, or `None`
+    /// without a session. A window whose targets are stale is repainted.
+    pub fn update_drag(
+        &mut self,
+        location: DragLocation,
+        policy: &(impl DropPolicy + ?Sized),
+    ) -> Option<DragOutcome> {
+        update(
+            &mut self.shared.drag,
+            &self.windows,
+            self.window,
+            location,
+            policy,
+        )
+    }
+
+    /// Release the session at `release`, or where the last update left it,
+    /// resolved again against that window's current targets (see
+    /// [`DragSession::finish`]). Commit only a [`DragOutcome::Target`]
+    /// result. The handler's actions are delivered once this callback
+    /// returns, so the returned end carries none.
+    pub fn finish_drag(
+        &mut self,
+        release: Option<DragLocation>,
+        policy: &(impl DropPolicy + ?Sized),
+    ) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        finish(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+            release,
+            policy,
+        )
+    }
+
+    /// End the session without a drop. The handler's actions are delivered
+    /// once this callback returns.
+    pub fn cancel_drag_session(&mut self) -> Option<DragEnd> {
+        let shared = &mut *self.shared;
+        cancel(
+            &mut shared.drag,
+            &self.windows,
+            self.window,
+            &mut shared.queued,
+        )
+    }
+}
+
 /// Resolves locations that need no targets: unknown, outside, or over a
 /// window that painted none.
 struct NoTargets;
@@ -56,7 +173,7 @@ impl DropPolicy for NoTargets {
 }
 
 /// The window `id` names, if it has state.
-pub(super) fn window_of(windows: &WindowStates, id: DragWindowId) -> Option<WindowHandle> {
+fn window_of(windows: &WindowStates, id: DragWindowId) -> Option<WindowHandle> {
     windows
         .handles()
         .find(|&window| drag_window_id(window) == id)
@@ -85,7 +202,7 @@ fn redraw_at(windows: &WindowStates, location: DragLocation, cx: &mut EventConte
 
 /// Start `session`, from the window `source` if it is one of the
 /// adapter's; the session it replaces, if any, ends cancelled.
-pub(super) fn start(
+fn start(
     drag: &mut Option<ActiveDrag>,
     windows: &WindowStates,
     cx: &mut EventContext,
@@ -101,7 +218,7 @@ pub(super) fn start(
 
 /// Move the session to `location`, repainting the windows its preview
 /// left and entered, and a window whose targets turned out stale.
-pub(super) fn update(
+fn update(
     drag: &mut Option<ActiveDrag>,
     windows: &WindowStates,
     cx: &mut EventContext,
@@ -127,7 +244,7 @@ pub(super) fn update(
 
 /// Release the session at `release` (or where it is) and resolve the drop.
 /// The handler's actions go to `queued`.
-pub(super) fn finish(
+fn finish(
     drag: &mut Option<ActiveDrag>,
     windows: &WindowStates,
     cx: &mut EventContext,

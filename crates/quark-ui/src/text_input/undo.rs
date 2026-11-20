@@ -9,6 +9,7 @@
 use quark_text::TextOffset;
 
 use super::atoms::{AtomList, InlineAtom};
+use super::doc_text::DocText;
 use super::styles::{StyleList, StyleSpan};
 
 /// A pause longer than this between edits starts a new undo step.
@@ -172,7 +173,7 @@ impl EditLog {
 /// Apply `edit` forward (`removed` becomes `inserted`) or backward, to the
 /// text and its atoms together.
 fn replay(
-    text: &mut String,
+    text: &mut DocText,
     atoms: &mut AtomList,
     styles: &mut StyleList,
     edit: &Edit,
@@ -193,7 +194,7 @@ fn replay(
             &edit.removed_styles,
         )
     };
-    if !replace_checked(text, edit.at, expected, with) {
+    if !text.replace_checked(edit.at, expected, with) {
         return false;
     }
     atoms.splice(edit.at, expected.len(), with_atoms, with.len());
@@ -203,7 +204,7 @@ fn replay(
 
 /// The parts of a buffer an edit changes.
 pub struct Doc<'a> {
-    pub text: &'a mut String,
+    pub text: &'a mut DocText,
     pub atoms: &'a mut AtomList,
     pub styles: &'a mut StyleList,
 }
@@ -228,15 +229,4 @@ fn continues(prev: &Edit, next: &Edit, kind: EditKind) -> bool {
         }
         EditKind::Other => false,
     }
-}
-
-/// Replace `expected` at `at` with `with`, only if `text` really holds
-/// `expected` there.
-fn replace_checked(text: &mut String, at: usize, expected: &str, with: &str) -> bool {
-    let end = at + expected.len();
-    if text.get(at..end) != Some(expected) {
-        return false;
-    }
-    text.replace_range(at..end, with);
-    true
 }

@@ -146,6 +146,24 @@ fn shell_widening_restores_the_users_sidebar_width() {
     assert_eq!(ui.find(divider).value, widened);
 }
 
+// Catches the narrow dock toggle sticking: below the dock breakpoint
+// Mod+Alt+B opens the collapsed dock anyway, until the window grows wide
+// enough to show it by itself; narrowed again, it collapses.
+#[test]
+fn shell_narrow_dock_toggle_lasts_until_the_window_widens() {
+    let mut ui = harness(ScenarioKind::Review);
+    let terminal = By::role_name(Role::Tab, "Terminal");
+    ui.resize(1100.0, 700.0);
+    let collapsed = ui.try_find(terminal.clone()).is_none();
+    ui.key("mod+alt+b");
+    let opened = ui.try_find(terminal.clone()).is_some();
+    ui.resize(WIDE.0, WIDE.1);
+    ui.resize(1100.0, 700.0);
+    let collapsed_again = ui.try_find(terminal).is_none();
+
+    assert_eq!((collapsed, opened, collapsed_again), (true, true, true));
+}
+
 // Catches a sidebar search input with no size of its own: it collapsed to
 // nothing inside its field, so its placeholder never showed and only the
 // field's edge took clicks. The empty search paints its placeholder.

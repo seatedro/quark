@@ -355,7 +355,54 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|v| v != "0")
 }
 
-#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
+/// How the demo runs, from the environment.
+struct Options {
+    /// Print view build times and row exactness (`QUARK_CHAT_LOG`).
+    log: bool,
+    streaming: Streaming,
+    measuring: Measuring,
+}
+
+impl Options {
+    fn from_env() -> Self {
+        Self {
+            log: std::env::var_os("QUARK_CHAT_LOG").is_some(),
+            streaming: if env_flag("QUARK_CHAT_IDLE") {
+                Streaming::Off
+            } else {
+                Streaming::On
+            },
+            measuring: if env_flag("QUARK_CHAT_SYNC") {
+                Measuring::WindowOnly
+            } else {
+                Measuring::Background
+            },
+        }
+    }
+}
+
+/// Whether answers stream in (`QUARK_CHAT_IDLE=1` turns them off).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Streaming {
+    On,
+    Off,
+}
+
+/// Where rows outside the window are measured: on a background thread,
+/// or not at all (`QUARK_CHAT_SYNC=1`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Measuring {
+    Background,
+    WindowOnly,
+}
+
+/// Whether every row's height is exact, as of the last frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Heights {
+    Estimated,
+    Exact,
+}
+
 struct Demo {
     chat: MarkdownDocument,
     rng: Rng,
@@ -363,12 +410,10 @@ struct Demo {
     answers: usize,
     next_key: u64,
     timing: Timing,
-    log: bool,
-    idle: bool,
-    sync: bool,
-    /// Frames drawn so far, and whether every row's height has been exact.
+    options: Options,
+    /// Frames drawn so far.
     frames: u64,
-    all_exact: bool,
+    heights: Heights,
     started: Instant,
     /// The find query field, while find is open.
     find: Option<TextField>,
@@ -410,11 +455,9 @@ impl Demo {
             answers: 0,
             next_key: history_len,
             timing: Timing::default(),
-            log: std::env::var_os("QUARK_CHAT_LOG").is_some(),
-            idle: env_flag("QUARK_CHAT_IDLE"),
-            sync: env_flag("QUARK_CHAT_SYNC"),
+            options: Options::from_env(),
             frames: 0,
-            all_exact: false,
+            heights: Heights::Estimated,
             started: Instant::now(),
             find: None,
         }
@@ -472,7 +515,12 @@ impl Demo {
         self.frames += 1;
         let rows = self.chat.document().list().rows();
         let exact = rows.measured_count();
-        if self.log && !self.all_exact && exact == rows.len() {
+        let heights = if exact == rows.len() {
+            Heights::Exact
+        } else {
+            Heights::Estimated
+        };
+        if self.options.log && self.heights == Heights::Estimated && heights == Heights::Exact {
             eprintln!(
                 "chat view: all {} rows exact after {} frames ({:.2} s)",
                 rows.len(),
@@ -480,12 +528,12 @@ impl Demo {
                 self.started.elapsed().as_secs_f64(),
             );
         }
-        self.all_exact = exact == rows.len();
+        self.heights = heights;
         let t = &mut self.timing;
         t.frames += 1;
         t.total += elapsed;
         t.max = t.max.max(elapsed);
-        if self.log && t.frames == 120 {
+        if self.options.log && t.frames == 120 {
             eprintln!(
                 "chat view: avg {:.3} ms, max {:.3} ms over {} frames ({} rows, {} exact, {} materialized)",
                 t.total.as_secs_f64() * 1e3 / f64::from(t.frames),
@@ -516,7 +564,7 @@ impl UiApp for Demo {
     fn init(&mut self, cx: &mut UiContext) {
         // The scripted answer arrives on a timer thread, the way a real
         // model's chunks arrive from a socket reader.
-        if self.idle {
+        if self.options.streaming == Streaming::Off {
             return;
         }
         let sender = cx.sender::<StreamTick>();
@@ -556,17 +604,16 @@ impl UiApp for Demo {
         let measurer =
             TextMeasurer::new(&mut text_cx.system, &mut text_cx.layouts, font_size, scale);
         let now_ms = now.as_millis() as u64;
-        if self.sync {
-            self.chat.prepare(
-                width,
-                body_h,
-                now_ms,
-                reduced_motion,
-                &mut WindowOnly(measurer),
-            );
-        } else {
-            self.chat
-                .prepare(width, body_h, now_ms, reduced_motion, &mut { measurer });
+        match self.options.measuring {
+            Measuring::Background => {
+                self.chat
+                    .prepare(width, body_h, now_ms, reduced_motion, &mut { measurer });
+            }
+            Measuring::WindowOnly => {
+                let mut measurer = WindowOnly(measurer);
+                self.chat
+                    .prepare(width, body_h, now_ms, reduced_motion, &mut measurer);
+            }
         }
         let element = self
             .chat
@@ -699,7 +746,7 @@ impl UiApp for Demo {
                 let copied = self.chat.selected_text();
                 if !copied.is_empty() {
                     cx.window.set_clipboard_text(&copied);
-                    if self.log {
+                    if self.options.log {
                         eprintln!("copied {} bytes", copied.len());
                     }
                 }
@@ -742,8 +789,8 @@ mod tests {
     /// window measured, in a 600x400 window.
     fn chat(history: u64) -> UiTestHarness<Demo> {
         let mut demo = Demo::with_history(history);
-        demo.idle = true;
-        demo.sync = true;
+        demo.options.streaming = Streaming::Off;
+        demo.options.measuring = Measuring::WindowOnly;
         UiTestHarness::new(demo, (600.0, 400.0), 1.0)
     }
 

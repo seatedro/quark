@@ -11,11 +11,12 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use quark_text::TextOffset;
-use quark_text::offset;
 
 use super::atoms::{AtomList, InlineAtom, RichClipboard, RichText};
+use super::doc_text::{DocText, TextChange, TextSnapshot};
 use super::hooks::{InputHooks, Insertion, NoHooks};
 use super::ime::{Composition, Preedit, compose};
+use super::rope::Rope;
 use super::styles::{InlineStyle, RichExport, StyleList, StyleSpan, TextFormat, restyled};
 use super::text_edit::{TextEditCommand, TextEditOutcome};
 use super::undo::{Doc, Edit, EditKind, EditLog};
@@ -42,7 +43,7 @@ pub(super) enum WordForward {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct TextBuffer {
-    text: String,
+    text: DocText,
     /// Atomic spans of `text`; the caret never rests inside one.
     atoms: AtomList,
     /// Formatting runs over `text`.
@@ -102,8 +103,31 @@ impl TextBuffer {
         }
     }
 
+    /// The text as one string; see [`DocText::as_str`].
     pub(super) fn text(&self) -> &str {
+        self.text.as_str()
+    }
+
+    pub(super) fn doc(&self) -> &DocText {
         &self.text
+    }
+
+    pub(super) fn rope(&self) -> &Rope {
+        self.text.rope()
+    }
+
+    pub(super) fn snapshot(&self) -> TextSnapshot {
+        self.text.snapshot()
+    }
+
+    /// Start logging which lines each change replaces.
+    pub(super) fn track_changes(&mut self) {
+        self.text.track_changes();
+    }
+
+    /// The changes since the last call; see [`DocText::take_changes`].
+    pub(super) fn take_changes(&mut self, out: &mut Vec<TextChange>) {
+        self.text.take_changes(out);
     }
 
     pub(super) fn cursor(&self) -> TextOffset {
@@ -120,7 +144,11 @@ impl TextBuffer {
     }
 
     pub(super) fn selected_text(&self) -> Option<&str> {
-        let selected = offset::slice(&self.text, self.selection());
+        let selection = self.selection();
+        let selected = self
+            .text()
+            .get(selection.start.get()..selection.end.get())
+            .unwrap_or_default();
         (!selected.is_empty()).then_some(selected)
     }
 
@@ -146,7 +174,7 @@ impl TextBuffer {
     pub(super) fn rich_slice(&self, range: Range<TextOffset>) -> RichText {
         let range = range.start.get()..range.end.get();
         RichText {
-            text: offset::slice(&self.text, range.clone()).to_owned(),
+            text: self.text.rope().slice_to_string(range.clone()),
             atoms: self.atoms.slice(range.clone()),
             styles: self.styles.slice(range),
         }
@@ -168,8 +196,8 @@ impl TextBuffer {
     }
 
     fn debug_check_atoms(&self) {
-        debug_assert_eq!(self.atoms.verify_integrity(&self.text), Ok(()));
-        debug_assert_eq!(self.styles.verify_integrity(&self.text), Ok(()));
+        debug_assert_eq!(self.atoms.verify_integrity(self.text.rope()), Ok(()));
+        debug_assert_eq!(self.styles.verify_integrity(self.text.rope()), Ok(()));
     }
 
     pub(super) fn now_ms(&self) -> u64 {
@@ -187,12 +215,11 @@ impl TextBuffer {
     /// Replace the text programmatically with the caret at the end.
     /// Clears undo history and any composition.
     pub(super) fn set_text(&mut self, text: &str) {
-        self.text.clear();
-        self.text.push_str(text);
+        self.text.set(text);
         self.atoms.clear();
         self.styles.clear();
         self.typing_format = None;
-        self.cursor = TextOffset::end(&self.text);
+        self.cursor = self.text.end();
         self.anchor = self.cursor;
         self.history.clear();
         self.clear_preedit();
@@ -205,7 +232,7 @@ impl TextBuffer {
         let at_end = self.cursor == self.text.len() && self.anchor == self.cursor;
         self.text.push_str(text);
         if at_end {
-            self.cursor = TextOffset::end(&self.text);
+            self.cursor = self.text.end();
             self.anchor = self.cursor;
         }
         self.history.break_coalescing();
@@ -259,7 +286,7 @@ impl TextBuffer {
     /// The text as painted while composing, or `None` when not composing.
     pub(super) fn composition(&self) -> Option<Composition> {
         let preedit = self.preedit.as_ref()?;
-        Some(compose(&self.text, self.selection(), preedit))
+        Some(compose(self.text.as_str(), self.selection(), preedit))
     }
 
     /// Commit composed IME text over the selection. Each commit is its own
@@ -294,10 +321,9 @@ impl TextBuffer {
             return false;
         }
         self.clear_preedit();
-        let range = offset::ordered(&self.text, range);
+        let range = self.text.ordered(range.start.get()..range.end.get());
         let range = self.atoms.expand(range.start.get()..range.end.get());
-        let range =
-            TextOffset::snap(&self.text, range.start)..TextOffset::snap(&self.text, range.end);
+        let range = self.text.snap(range.start)..self.text.snap(range.end);
         if range.is_empty() && inserted.is_empty() {
             return false;
         }
@@ -319,7 +345,7 @@ impl TextBuffer {
                     .collect()
             }
         };
-        let removed = offset::replace(&mut self.text, range.clone(), inserted);
+        let removed = self.text.replace(range.clone(), inserted);
         let at = range.start.get();
         let removed_atoms = self
             .atoms
@@ -330,7 +356,7 @@ impl TextBuffer {
         self.debug_check_atoms();
         // Rounding up keeps the caret after inserted text that merges into
         // the grapheme after it (a combining mark typed before another).
-        self.cursor = TextOffset::snap_up(&self.text, at + inserted.len());
+        self.cursor = self.text.snap_up(at + inserted.len());
         self.anchor = self.cursor;
         let edit = Edit {
             at,
@@ -357,7 +383,7 @@ impl TextBuffer {
             let style = self.styles.format_at(range.end.get()).style;
             return TextFormat { style, link: None };
         }
-        let before = offset::prev_grapheme(&self.text, range.start);
+        let before = self.text.prev_grapheme(range.start);
         let mut format = self.styles.format_at(before.get());
         if format.link.is_some() && self.styles.format_at(range.end.get()).link != format.link {
             format.link = None;
@@ -386,7 +412,7 @@ impl TextBuffer {
         }
         self.clear_preedit();
         self.history.break_coalescing();
-        let text = offset::slice(&self.text, selection).to_owned();
+        let text = self.text.slice(selection).into_owned();
         let atoms = self.atoms.slice(range.clone());
         self.styles
             .splice(range.start, range.len(), &updated, range.len());
@@ -506,19 +532,19 @@ impl TextBuffer {
     /// inside an atom goes on past it in the direction of travel. Ends the
     /// current undo step and any composition.
     pub(super) fn move_to(&mut self, at: TextOffset, extend: bool) {
-        let at = at.within(&self.text);
+        let at = self.text.within(at);
         let at = match self.atoms.containing(at.get()) {
             Some(atom) if at < self.cursor => atom.range.start,
             Some(atom) => atom.range.end,
             None => at.get(),
         };
-        self.place(TextOffset::snap(&self.text, at), extend);
+        self.place(self.text.snap(at), extend);
     }
 
     /// [`Self::move_to`] for a pointer: a point inside an atom goes to its
     /// nearer edge.
     fn move_to_point(&mut self, raw: usize, extend: bool) {
-        let at = TextOffset::snap(&self.text, raw);
+        let at = self.text.snap(raw);
         let at = match self.atoms.containing(at.get()) {
             Some(atom) if at.get() - atom.range.start < atom.range.end - at.get() => {
                 atom.range.start
@@ -526,7 +552,7 @@ impl TextBuffer {
             Some(atom) => atom.range.end,
             None => at.get(),
         };
-        self.place(TextOffset::snap(&self.text, at), extend);
+        self.place(self.text.snap(at), extend);
     }
 
     fn place(&mut self, at: TextOffset, extend: bool) {
@@ -542,8 +568,8 @@ impl TextBuffer {
     /// Select `range`, grown to take whole any atom it touches.
     fn select(&mut self, range: Range<TextOffset>) {
         let range = self.atoms.expand(range.start.get()..range.end.get());
-        self.place(TextOffset::snap(&self.text, range.start), false);
-        self.place(TextOffset::snap(&self.text, range.end), true);
+        self.place(self.text.snap(range.start), false);
+        self.place(self.text.snap(range.end), true);
     }
 
     /// Move the caret to `target(self, cursor)`, or, when not extending,
@@ -564,8 +590,8 @@ impl TextBuffer {
 
     fn word_forward(&self, at: TextOffset) -> TextOffset {
         match self.word_forward {
-            WordForward::NextStart => offset::next_word_start(&self.text, at),
-            WordForward::NextEnd => offset::next_word_end(&self.text, at),
+            WordForward::NextStart => self.text.next_word_start(at),
+            WordForward::NextEnd => self.text.next_word_end(at),
         }
     }
 
@@ -573,9 +599,9 @@ impl TextBuffer {
     /// when multiline, else the whole text.
     fn line_bounds(&self, at: TextOffset) -> Range<TextOffset> {
         if self.multiline {
-            offset::line_start(&self.text, at)..offset::line_end(&self.text, at)
+            self.text.line_start(at)..self.text.line_end(at)
         } else {
-            TextOffset::ZERO..TextOffset::end(&self.text)
+            TextOffset::ZERO..self.text.end()
         }
     }
 
@@ -611,8 +637,8 @@ impl TextBuffer {
         let Some((anchor, cursor)) = selection else {
             return false;
         };
-        self.anchor = anchor.within(&self.text);
-        self.cursor = cursor.within(&self.text);
+        self.anchor = self.text.within(anchor);
+        self.cursor = self.text.within(cursor);
         true
     }
 
@@ -658,15 +684,15 @@ impl TextBuffer {
                 self.insert(self.selection(), &insertion)
             }
             Backspace => {
-                let target = offset::prev_grapheme(&self.text, cursor);
+                let target = self.text.prev_grapheme(cursor);
                 self.delete_to(target, EditKind::Deleting)
             }
             DeleteForward => {
-                let target = offset::next_grapheme(&self.text, cursor);
+                let target = self.text.next_grapheme(cursor);
                 self.delete_to(target, EditKind::Deleting)
             }
             BackspaceWord => {
-                let target = offset::prev_word_start(&self.text, cursor);
+                let target = self.text.prev_word_start(cursor);
                 self.delete_to(target, EditKind::Other)
             }
             DeleteForwardWord => self.delete_to(self.word_forward(cursor), EditKind::Other),
@@ -706,29 +732,29 @@ impl TextBuffer {
         use TextEditCommand::*;
         let line = |b: &Self| b.line_bounds(b.cursor);
         match cmd {
-            CursorLeft => self.step(false, false, |b, at| offset::prev_grapheme(&b.text, at)),
-            SelectLeft => self.step(false, true, |b, at| offset::prev_grapheme(&b.text, at)),
-            CursorRight => self.step(true, false, |b, at| offset::next_grapheme(&b.text, at)),
-            SelectRight => self.step(true, true, |b, at| offset::next_grapheme(&b.text, at)),
-            CursorWordLeft => self.step(false, false, |b, at| offset::prev_word_start(&b.text, at)),
-            SelectWordLeft => self.step(false, true, |b, at| offset::prev_word_start(&b.text, at)),
+            CursorLeft => self.step(false, false, |b, at| b.text.prev_grapheme(at)),
+            SelectLeft => self.step(false, true, |b, at| b.text.prev_grapheme(at)),
+            CursorRight => self.step(true, false, |b, at| b.text.next_grapheme(at)),
+            SelectRight => self.step(true, true, |b, at| b.text.next_grapheme(at)),
+            CursorWordLeft => self.step(false, false, |b, at| b.text.prev_word_start(at)),
+            SelectWordLeft => self.step(false, true, |b, at| b.text.prev_word_start(at)),
             CursorWordRight => self.step(true, false, Self::word_forward),
             SelectWordRight => self.step(true, true, Self::word_forward),
             CursorHome | CursorSoftHome => self.move_to(line(self).start, false),
             SelectHome | SelectSoftHome => self.move_to(line(self).start, true),
             CursorEnd | CursorSoftEnd => self.move_to(line(self).end, false),
             SelectEnd | SelectSoftEnd => self.move_to(line(self).end, true),
-            SelectAll => self.select(TextOffset::ZERO..TextOffset::end(&self.text)),
+            SelectAll => self.select(TextOffset::ZERO..self.text.end()),
             SelectWordAt(raw) => {
-                let at = TextOffset::snap(&self.text, raw);
-                self.select(offset::word_range_at(&self.text, at));
+                let at = self.text.snap(raw);
+                self.select(self.text.word_range_at(at));
             }
             SelectLineAt(raw) => {
-                let at = TextOffset::snap(&self.text, raw);
+                let at = self.text.snap(raw);
                 let range = if self.multiline {
-                    offset::line_range_at(&self.text, at)
+                    self.text.line_range_at(at)
                 } else {
-                    TextOffset::ZERO..TextOffset::end(&self.text)
+                    TextOffset::ZERO..self.text.end()
                 };
                 self.select(range);
             }
