@@ -69,6 +69,7 @@ pub use app::{UiApp, UiSender};
 pub use context::{UiContext, ViewContext};
 pub use drag::{drag_location, drag_window_id};
 pub use pointer::HoveredTooltip;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use window::WindowUiState;
 
 /// Why the adapter asked for a frame.
