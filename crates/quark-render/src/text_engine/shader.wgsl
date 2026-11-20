@@ -61,29 +61,8 @@ var<uniform> offsets: array<vec4<i32>, 1024>;
 @group(2) @binding(0)
 var<uniform> fills: array<GlyphFill, 64>;
 
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        return c / 12.92;
-    } else {
-        return pow((c + 0.055) / 1.055, 2.4);
-    }
-}
-
-fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 {
-        return c * 12.92;
-    } else {
-        return 1.055 * pow(c, 1.0 / 2.4) - 0.055;
-    }
-}
-
-fn decode(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(srgb_to_linear(c.r), srgb_to_linear(c.g), srgb_to_linear(c.b));
-}
-
-fn encode(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(linear_to_srgb(c.r), linear_to_srgb(c.g), linear_to_srgb(c.b));
-}
+// The sRGB transfer functions come from `shaders/srgb.wgsl`, which
+// `TEXT_SHADER` puts ahead of this file.
 
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -202,8 +181,8 @@ fn fill_color(index: u32, p: vec2<f32>, encoded: u32) -> vec4<f32> {
     if encoded == 1u {
         return mix(fill.color_a, fill.color_b, t);
     }
-    let a = vec4<f32>(decode(fill.color_a.rgb), fill.color_a.a);
-    let b = vec4<f32>(decode(fill.color_b.rgb), fill.color_b.a);
+    let a = vec4<f32>(srgb_decode(fill.color_a.rgb), fill.color_a.a);
+    let b = vec4<f32>(srgb_decode(fill.color_b.rgb), fill.color_b.a);
     return mix(a, b, t);
 }
 
@@ -213,7 +192,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
         case 0u: {
             let c = textureSampleLevel(color_atlas_texture, atlas_sampler, in_frag.uv, 0.0);
             if in_frag.fill_encoded.y == 1u {
-                return vec4<f32>(encode(c.rgb), c.a);
+                return vec4<f32>(srgb_encode(c.rgb), c.a);
             }
             return c;
         }
@@ -230,7 +209,7 @@ fn fs_main(in_frag: VertexOutput) -> @location(0) vec4<f32> {
                 // sRGB-encoded luminance.
                 var encoded_rgb = color.rgb;
                 if in_frag.fill_encoded.y == 0u {
-                    encoded_rgb = encode(color.rgb);
+                    encoded_rgb = srgb_encode(color.rgb);
                 }
                 let level = clamp(floor(luminance(encoded_rgb) * 4.0 + 0.5), 0.0, 4.0);
                 uv.y = uv.y + level * in_frag.plane_step;

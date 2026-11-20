@@ -103,6 +103,30 @@
 //! let _list = rows(&[Row { id: 1, revision: 0, label: "first".into() }], Some(1));
 //! ```
 //!
+//! A [`element::reactive`] boundary needs no hash: the signals its build
+//! reads through the frame's context are its inputs, so writing one
+//! rebuilds the boundaries that read it and no others:
+//!
+//! ```
+//! use quark::reactive::{Signal, SignalStore};
+//! use quark::view;
+//! use quark_ui::element::{AnyElement, IntoAnyElement, reactive, text};
+//! use quark_ui::style::Styled;
+//!
+//! fn row_view(id: u64, label: Signal<String>, selected: Signal<Option<u64>>) -> AnyElement {
+//!     view! {
+//!         <reactive(id, move |cx| view! {
+//!             <text @when {cx.read(selected) == Some(id)} { class="font-semibold" }>
+//!                 {cx.read(label)}
+//!             </text>
+//!         }) />
+//!     }
+//! }
+//!
+//! let store = SignalStore::new();
+//! let _row = row_view(1, store.create("first".to_owned()), store.create(Some(1)));
+//! ```
+//!
 //! A [`virtual_list::VariableList`] keeps row heights and the scroll
 //! position, so a view builds only the rows in its window, and
 //! [`document::FindState`] searches block text by key, whether or not the

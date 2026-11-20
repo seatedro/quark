@@ -105,6 +105,7 @@ pub(super) fn draw_2500_257f(cp: u32, canvas: &mut Canvas, _w: u32, _h: u32, m: 
 /// Draws each arm from the edge to where it meets the others, so light
 /// and heavy arms join without notches and double arms leave the
 /// crossing open where both strokes are double.
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 pub(super) fn lines_char(m: &CellMetrics, canvas: &mut Canvas, lines: Lines) {
     use Style::{Double, Heavy, Light, None};
     let light = Thickness::Light.height(m.box_thickness);

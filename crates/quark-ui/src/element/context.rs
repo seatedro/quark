@@ -1,5 +1,3 @@
-use std::cell::Cell;
-
 use super::*;
 use crate::animation::{AnimKey, AnimationTable, Motion, PropId};
 
@@ -23,18 +21,26 @@ pub struct ElementContext<'a> {
     pub hit_table: HitTable,
     /// Event handlers keyed by semantic node; registered in paint.
     pub handlers: InputHandlers,
+    /// The focused element. Read it through [`Self::focused`] or
+    /// [`Self::is_focused`] inside a cache boundary, so the boundary
+    /// depends on it.
     pub focus: Option<FocusId>,
     /// Whether focus shows its ring (CSS `:focus-visible`): it came from
     /// the keyboard, assistive tech, or the app, and no pointer press has
     /// moved or claimed it since. Text fields show their caret and ring
-    /// either way.
+    /// either way. Read it through [`Self::is_focus_visible`] inside a
+    /// cache boundary.
     pub focus_visible: bool,
     pub signal_store: &'a SignalStore,
+    /// The window's signals, once the frame synced the element cache's.
+    pub(super) window_signals: Option<WindowSignals>,
     pub clock_ms: u64,
     /// Earliest clock time (ms) an element asked to be painted again at.
     next_frame_ms: Option<u64>,
     /// The window's animation table, when the host keeps one.
-    animations: Option<&'a mut AnimationTable>,
+    pub(super) animations: Option<&'a mut AnimationTable>,
+    /// The window's presence table, when the host keeps one.
+    pub(super) presence: Option<&'a mut PresenceTable>,
     /// Keys that animated a style transition this frame.
     transition_keys: Vec<AnimKey>,
     pub debug_wireframe: bool,
@@ -74,9 +80,6 @@ pub struct ElementContext<'a> {
     /// Ids of the same hits, so the boundary can read them back.
     local_hit_ids: Vec<HitId>,
     local_hit_base: usize,
-    /// Reads of focus state, so a cache boundary knows its output depends
-    /// on focus.
-    focus_reads: Cell<u32>,
     /// Requests that make painted output depend on the clock (repaint
     /// requests, running transitions), so a cache boundary does not keep it.
     volatile_reads: u32,
@@ -125,9 +128,11 @@ impl<'a> ElementContext<'a> {
             focus: None,
             focus_visible: true,
             signal_store,
+            window_signals: None,
             clock_ms: 0,
             next_frame_ms: None,
             animations: None,
+            presence: None,
             transition_keys: Vec::new(),
             debug_wireframe: false,
             text_input_hit_areas: Vec::new(),
@@ -154,7 +159,6 @@ impl<'a> ElementContext<'a> {
             local_hit_clips: Vec::new(),
             local_hit_ids: Vec::new(),
             local_hit_base: 0,
-            focus_reads: Cell::new(0),
             volatile_reads: 0,
             z_index_stack: Vec::new(),
             hit_spaces: Vec::new(),
@@ -218,7 +222,8 @@ impl<'a> ElementContext<'a> {
             .map_or(0.0, |layout| layout.size().0.ceil())
     }
 
-    /// Read a signal's value (clones it out). Tracked by the current observer scope.
+    /// Read a signal's value (clones it out). Tracked by the current
+    /// observer scope: inside a cache boundary, the boundary depends on it.
     pub fn read<T: 'static + Clone>(&self, signal: Signal<T>) -> T {
         self.signal_store.read(signal)
     }
@@ -264,6 +269,13 @@ impl<'a> ElementContext<'a> {
     /// reads it with [`Self::next_frame_ms`] and schedules that window only.
     pub fn request_frame_at_ms(&mut self, at_ms: u64) {
         self.volatile_reads += 1;
+        self.schedule_frame_at_ms(at_ms);
+    }
+
+    /// [`Self::request_frame_at_ms`] without making the output depend on
+    /// the clock: the next frame shows what this one could not, and a
+    /// cache boundary may still keep this one's.
+    pub(super) fn schedule_frame_at_ms(&mut self, at_ms: u64) {
         self.next_frame_ms = Some(self.next_frame_ms.map_or(at_ms, |next| next.min(at_ms)));
     }
 
@@ -327,10 +339,22 @@ impl<'a> ElementContext<'a> {
         self
     }
 
+    /// Attach the window's presence table so keyed divs with a
+    /// [`Div::presence`] transition enter and leave; it needs the animation
+    /// table too. The table persists across frames; attaching it begins
+    /// one.
+    pub fn with_presence(mut self, table: &'a mut PresenceTable) -> Self {
+        table.begin_frame();
+        self.presence = Some(table);
+        self
+    }
+
     /// End the frame for animations: drop transition rows of keyed elements
-    /// this frame did not paint, so removed elements do not keep rows. Call
-    /// once after painting every root of the frame.
+    /// this frame did not paint, so removed elements do not keep rows, and
+    /// presence rows whose exit settled. Call once after painting every
+    /// root of the frame.
     pub fn finish_frame(&mut self) {
+        self.finish_presence();
         if let Some(table) = self.animations.as_deref_mut() {
             crate::animation::sweep_transitions(table, &mut self.transition_keys);
         }
@@ -402,23 +426,43 @@ impl<'a> ElementContext<'a> {
         &self.transition_keys
     }
 
-    pub(super) fn focus_reads(&self) -> u32 {
-        self.focus_reads.get()
-    }
-
     pub(super) fn volatile_reads(&self) -> u32 {
         self.volatile_reads
     }
 
+    /// The signals the window's element cache publishes focus and theme
+    /// through; `None` without a cache, or before the frame starts.
+    pub fn window_signals(&self) -> Option<WindowSignals> {
+        self.window_signals
+    }
+
+    /// The focused element. Inside a cache boundary, the boundary depends
+    /// on focus.
+    pub fn focused(&self) -> Option<FocusId> {
+        if let Some(window) = self.window_signals {
+            window.focus.track(self.signal_store);
+        }
+        self.focus
+    }
+
+    /// Whether `target` is focused. Inside a cache boundary, the boundary
+    /// depends on focus.
     pub fn is_focused(&self, target: FocusId) -> bool {
-        self.focus_reads.set(self.focus_reads.get().wrapping_add(1));
-        self.focus == Some(target)
+        self.focused() == Some(target)
     }
 
     /// Whether `target` is focused and its focus should show
-    /// ([`Self::focus_visible`]): what focus rings paint on.
+    /// ([`Self::focus_visible`]): what focus rings paint on. Inside a cache
+    /// boundary, the boundary depends on focus and, while `target` has it,
+    /// on whether it shows.
     pub fn is_focus_visible(&self, target: FocusId) -> bool {
-        self.is_focused(target) && self.focus_visible
+        if !self.is_focused(target) {
+            return false;
+        }
+        if let Some(window) = self.window_signals {
+            window.focus_visible.track(self.signal_store);
+        }
+        self.focus_visible
     }
 
     pub fn current_z_index(&self) -> i32 {
@@ -657,6 +701,11 @@ impl<'a> ElementContext<'a> {
         if self.hit_spaces.pop().is_some() {
             self.clip_stack.pop();
         }
+    }
+
+    /// The clips around what paints now, in window coordinates.
+    pub(super) fn current_window_clip(&self) -> Rect {
+        self.current_paint_space().window_clip
     }
 
     fn current_paint_space(&self) -> PaintSpace {

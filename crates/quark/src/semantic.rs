@@ -64,6 +64,10 @@ pub enum SemanticRole {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct SemanticActions {
     pub click: bool,
     pub focus: bool,

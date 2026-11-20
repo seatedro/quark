@@ -55,8 +55,8 @@ fn row_view(row: &Row, is_selected: bool) -> AnyElement {
 ```
 
 - Replays only while these match the recording frame: key and inputs hash,
-  the size the parent offers, scale factor and theme, the focused element
-  (if the subtree read focus), inherited paint state.
+  every signal the subtree read (focus and the theme included), the size
+  the parent offers, scale factor, inherited paint state.
 - Hovered subtrees, subtrees with running animations, and subtrees
   containing a text input rebuild instead.
 - The hash must cover every value the closure reads. A missed value is the
@@ -64,6 +64,33 @@ fn row_view(row: &Row, is_selected: bool) -> AnyElement {
 - Unused entries are evicted after 60 layout passes.
 - Full contract:
   [element/cache/mod.rs](../../crates/quark-ui/src/element/cache/mod.rs).
+
+### Signals instead of a hash
+
+`reactive(key, build)` is a boundary with no inputs hash: `build` gets the
+frame's context, and the signals it (or anything painted inside) reads
+through it are the boundary's inputs. A write rebuilds the boundaries that
+read the signal; the rest replay, checking their reads in O(reads) with no
+allocation.
+
+```rust,ignore
+reactive(row.id, move |cx| {
+    let selected = cx.read(selection) == Some(row.id);
+    view! { <text @when {selected} { class="font-semibold" }>{cx.read(row.label)}</text> }
+})
+```
+
+- In `view!`: `<reactive(row.id, move |cx| build(cx)) class="w-full" />`.
+- A value the closure captures that is not a signal must be the same every
+  frame; hash it with `cached` otherwise.
+- `cached` boundaries track signals too, on top of their hash.
+- Nesting: an outer boundary's recording holds the nested ones' output, so
+  it depends on what they read as well. A signal only the outer boundary
+  read rebuilds it while the nested ones replay; one a nested boundary read
+  rebuilds that one and the boundaries around it, not its siblings.
+- `cx.is_focused(id)` and `cx.is_focus_visible(id)` read focus as signals;
+  `ScrollHandle::offset()` read inside a boundary tracks the handle, which
+  repaints the reader the frame after a jump its container resolves.
 
 ### What caches itself
 

@@ -145,3 +145,6 @@ native = [
 # `testing::trust_leaf`: trust one fixture certificate for exact loopback
 # hosts. For the webview smoke tests only; never enable it in an app.
 test-trust = []
+
+[lints]
+workspace = true

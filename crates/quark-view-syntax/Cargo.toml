@@ -25,3 +25,6 @@ locations = ["proc-macro2/span-locations"]
 [dev-dependencies]
 # The source boundary tests read byte ranges.
 quark-view-syntax = { path = ".", features = ["locations"] }
+
+[lints]
+workspace = true

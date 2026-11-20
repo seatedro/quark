@@ -293,6 +293,7 @@ struct SelectDrag {
 /// pointer reports come from the app's raw input hook through
 /// [`Self::key_press`], [`Self::text_input`], and [`Self::pointer`];
 /// selection comes from the view as [`TerminalEvent`]s for [`Self::handle`].
+#[expect(clippy::struct_excessive_bools, reason = "predates the lint")]
 pub struct TerminalState {
     id: &'static str,
     focus: FocusId,

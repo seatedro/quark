@@ -14,7 +14,7 @@
 //! - [`selection`]: text selection across many blocks, keyed by stable
 //!   [`BlockKey`]s.
 //! - [`animation`]: tween and spring rows keyed by stable UI identity and
-//!   property.
+//!   property, evaluated in closed form.
 //!
 //! A memo recomputes only when a signal it read changed:
 //!
@@ -74,8 +74,10 @@ pub mod style_state;
 mod test_support;
 pub mod transform;
 
-pub use animation::{AnimKey, AnimKind, AnimationTable, Curve, Motion, PropId, SpringParams};
-pub use color::Color;
+pub use animation::{
+    AnimKey, AnimKind, AnimPhase, AnimationTable, Curve, Motion, PropId, RectMotion, SpringParams,
+};
+pub use color::{Color, Oklab};
 pub use event::{UiEventBinding, UiEventKind, UiEventPhase, UiEventPropagation, UiEventResult};
 pub use focus::{FocusId, FocusNode, FocusScopeId, FocusTree, KeyContext, TabStop};
 pub use geometry::{Px, Rect, ViewLength};
@@ -90,11 +92,11 @@ pub use path::{
 pub use scene::{
     AlphaMask, BlurRegionPrimitive, BorderPrimitive, ChunkPrimitive, ClipPrimitive,
     EffectQuadPrimitive, EffectType, FadeEdge, FontKind, FontWeight, IconPrimitive, ImagePrimitive,
-    IsolatePrimitive, LayerPrimitive, MaskStop, MaskStops, MaterialKind, PathFill, PathPrimitive,
-    PathStroke, Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive, Scene,
-    SceneChunk, ShadowPrimitive, ShapedText, ShimmerDirection, ShimmerSpec, StripesPrimitive,
-    StyledDecoration, StyledTextPrimitive, SurfaceBackground, TextBackdrop, TextDecorationStyle,
-    TextFill, TextGradient, TextPrimitive, TextRendering, UiCompositing,
+    IsolatePrimitive, LayerPrimitive, LayerTransform, MaskStop, MaskStops, MaterialKind, PathFill,
+    PathPrimitive, PathStroke, Primitive, RectPrimitive, RichTextPrimitive, RoundedRectPrimitive,
+    Scene, SceneChunk, ShadowPrimitive, ShapedText, ShimmerDirection, ShimmerSpec,
+    StripesPrimitive, StyledDecoration, StyledTextPrimitive, SurfaceBackground, TextBackdrop,
+    TextDecorationStyle, TextFill, TextGradient, TextPrimitive, TextRendering, UiCompositing,
 };
 pub use selection::{BlockKey, BlockOrder, Selection, SelectionPoint, SelectionText, copy_text};
 pub use semantic::{

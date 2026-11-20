@@ -42,6 +42,10 @@ pub enum Underline {
 /// applied: `fg` is the color the glyphs take and `bg` is `None` where the
 /// terminal background shows through.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct CellStyle {
     pub fg: Rgb,
     pub bg: Option<Rgb>,

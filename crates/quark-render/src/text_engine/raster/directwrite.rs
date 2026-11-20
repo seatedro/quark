@@ -453,8 +453,10 @@ mod native {
                 .collect();
             // Synthetic italic is a transform (swash's exact slant), not
             // DirectWrite's oblique simulation.
+            // SAFETY: `resource` is a valid DirectWrite font face reference and `axes` is a valid slice.
             let face = unsafe { resource.CreateFontFace(DWRITE_FONT_SIMULATIONS_NONE, &axes) }
                 .map_err(|_| RasterError::UnsupportedFont)?;
+            // SAFETY: `face` is a valid COM `IDWriteFontFace5` returned above.
             if u32::from(unsafe { face.GetGlyphCount() }) != font.glyph_count() {
                 return Err(RasterError::UnsupportedFont);
             }
@@ -623,6 +625,7 @@ mod native {
         .map_err(platform)?;
         // With grayscale antialiasing the 1x1 texture holds coverage, not
         // bilevel ink, despite its name.
+        // SAFETY: `analysis` is a valid DirectWrite glyph run analysis created above.
         let bounds = unsafe { analysis.GetAlphaTextureBounds(DWRITE_TEXTURE_ALIASED_1x1) }
             .map_err(platform)?;
         let rect = PixelRect {

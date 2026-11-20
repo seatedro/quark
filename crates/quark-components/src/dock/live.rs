@@ -24,10 +24,28 @@ use super::{
 use crate::pane_tree::{PaneId, PaneNode, TabGroup};
 use crate::split::Axis;
 
+/// Whether a floating host has settled into its window, or is still held
+/// by the drag that tore it off.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum HostPhase {
+    Settled,
+    Live(Box<LiveDetach>),
+}
+
+impl HostPhase {
+    /// The drag that tore the host off ended: it settles, handing back the
+    /// way to undo the tear-off.
+    fn settle(&mut self) -> Option<LiveDetach> {
+        match std::mem::replace(self, Self::Settled) {
+            Self::Live(record) => Some(*record),
+            Self::Settled => None,
+        }
+    }
+}
+
 /// A live tear-off in progress, and how to undo it.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct LiveDetach {
-    pub(super) host: HostId,
     /// The panels torn off, in order.
     panels: Vec<PanelId>,
     /// The group they left, and the first one's tab index there.
@@ -79,7 +97,6 @@ impl DockState {
             .group(from.pane)
             .is_some_and(|g| g.panels.len() == panels.len());
         let record = LiveDetach {
-            host,
             panels,
             from,
             index,
@@ -96,7 +113,9 @@ impl DockState {
             .area_root(from.host, from.region)
             .expect("a host is never torn off whole")
             .clone();
-        self.live.push(LiveDetach { after, ..record });
+        self.floating_host_mut(host)
+            .expect("the transfer made the host")
+            .phase = HostPhase::Live(Box::new(LiveDetach { after, ..record }));
         effects.announce = false;
         effects.persist = false;
         effects.open_host = Some(host);
@@ -105,7 +124,12 @@ impl DockState {
 
     /// Whether `host` is a live tear-off whose drag has not ended.
     pub fn is_live(&self, host: HostId) -> bool {
-        self.live.iter().any(|l| l.host == host)
+        self.floating_host(host)
+            .is_some_and(|h| matches!(h.phase, HostPhase::Live(_)))
+    }
+
+    fn floating_host_mut(&mut self, host: HostId) -> Option<&mut FloatingHost> {
+        self.floating.iter_mut().find(|h| h.id == host)
     }
 
     /// The torn off host was released over a group: move its panels there,
@@ -131,14 +155,14 @@ impl DockState {
     /// window, and the move is announced and saved. Its panels return to
     /// where they left from when it is closed.
     pub fn end_live_detach(&mut self, host: HostId) -> Result<DockEffects, TransferRefusal> {
-        let at = self
-            .live
-            .iter()
-            .position(|l| l.host == host)
+        let floating = self
+            .floating_host_mut(host)
             .ok_or(TransferRefusal::MissingHost(host))?;
-        let record = self.live.remove(at);
-        let root = self.host_root(host).expect("live hosts exist");
-        let pane = root.groups()[0].id;
+        let record = floating
+            .phase
+            .settle()
+            .ok_or(TransferRefusal::MissingHost(host))?;
+        let pane = floating.root.groups()[0].id;
         self.changed();
         Ok(DockEffects {
             moved: record.panels,
@@ -162,20 +186,28 @@ impl DockState {
     /// no longer holds just those panels.
     pub fn cancel_live_detach(&mut self, host: HostId) -> Result<DockEffects, TransferRefusal> {
         let at = self
-            .live
+            .floating
             .iter()
-            .position(|l| l.host == host)
+            .position(|h| h.id == host)
             .ok_or(TransferRefusal::MissingHost(host))?;
-        let groups = self.host_root(host).map(PaneNode::groups);
-        let Some([group]) = groups.as_deref() else {
+        let floating = &self.floating[at];
+        let HostPhase::Live(record) = &floating.phase else {
+            return Err(TransferRefusal::MissingHost(host));
+        };
+        let groups = floating.root.groups();
+        let [group] = groups.as_slice() else {
             return Err(TransferRefusal::Stale);
         };
-        if group.panels != self.live[at].panels {
+        if group.panels != record.panels {
             return Err(TransferRefusal::Stale);
         }
         let active = group.active;
-        let record = self.live.remove(at);
-        self.floating.retain(|h| h.id != host);
+        let record = self
+            .floating
+            .remove(at)
+            .phase
+            .settle()
+            .expect("checked live");
         let from = record.from;
         let area = (from.host, from.region);
         if self.area_root(area.0, area.1) == Some(&record.after) {

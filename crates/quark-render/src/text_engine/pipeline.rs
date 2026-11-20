@@ -45,6 +45,7 @@ struct Inner {
 
 impl Cache {
     /// Creates a new `Cache` with the given `device`.
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     pub(crate) fn new(device: &Device) -> Self {
         let sampler = device.create_sampler(&SamplerDescriptor {
             label: Some("quark text sampler"),
@@ -58,7 +59,7 @@ impl Cache {
 
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("quark text shader"),
-            source: ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: ShaderSource::Wgsl(Cow::Borrowed(crate::shaders::TEXT_SHADER)),
         });
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {

@@ -1371,6 +1371,10 @@ impl TreeColors {
 
 /// Everything one row's build closure reads besides its label and icon.
 #[derive(Debug, Clone, Copy, PartialEq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 struct RowSpec {
     node: u32,
     depth: u16,

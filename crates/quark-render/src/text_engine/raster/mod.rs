@@ -53,6 +53,10 @@ pub(crate) enum RasterBackend {
 
 /// What a backend can draw, for choosing a fallback before asking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub(crate) struct RasterCapabilities {
     /// Layered color outlines (COLR).
     pub color_outlines: bool,

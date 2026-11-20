@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::live::HostPhase;
 use super::{Dock, DockRegion, DockState, PanelId, TabPolicy, crossing_refusal, drop_is_noop};
 use crate::pane_tree::{DropZone, PaneDrop, PaneId, PaneNode, TabGroup};
 use quark_ui::FocusId;
@@ -169,6 +170,7 @@ pub(super) struct FloatingHost {
     /// The group last selected or dropped into.
     pub(super) recent: PaneId,
     pub(super) label: Option<String>,
+    pub(super) phase: HostPhase,
 }
 
 impl FloatingHost {
@@ -180,6 +182,7 @@ impl FloatingHost {
             policy: TabPolicy::OPEN,
             recent,
             label: None,
+            phase: HostPhase::Settled,
         }
     }
 }

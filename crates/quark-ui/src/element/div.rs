@@ -8,12 +8,17 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// A flexbox container. The core building block.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct Div {
     base_style: ElementStyle,
     hover_style: Option<StyleOverride>,
     /// Applied over the hover style while the div's focus shows.
     focus_visible_style: Option<StyleOverride>,
     transitions: Transitions,
+    presence: Option<Transition>,
     /// Paint-time offset, rotation, and scale of the div and its subtree;
     /// layout ignores them.
     transform: PaintTransform,
@@ -88,6 +93,7 @@ pub fn div() -> Div {
         hover_style: None,
         focus_visible_style: None,
         transitions: Transitions::default(),
+        presence: None,
         transform: PaintTransform::IDENTITY,
         bg_effect: None,
         blur_radius: None,
@@ -401,6 +407,17 @@ impl Div {
     /// either the div paints its target values directly.
     pub fn transition(mut self, props: impl Into<PropSet>, motion: Motion) -> Self {
         self.transitions.push(props.into(), motion);
+        self
+    }
+
+    /// Enter with `transition` when the div first appears, and leave with
+    /// it when it is gone from the tree: the window keeps painting its last
+    /// frame, inert, until the exit settles. A div that comes back
+    /// mid-exit returns from where it is. Needs a stable
+    /// [`key`](Self::key) and a context with presence and animation
+    /// tables; see [`PresenceTable`].
+    pub fn presence(mut self, transition: Transition) -> Self {
+        self.presence = Some(transition);
         self
     }
 
@@ -973,6 +990,9 @@ impl Div {
 /// and its scroll offset and scrollbars.
 pub struct DivPrepaintState {
     hit: Option<HitId>,
+    /// The div's presence row this frame, and the move and scale its layer
+    /// draws it through.
+    presence: Option<(PresenceSlot, Option<Transform2D>)>,
     /// The div's [`Div::show_when`] slot this frame.
     slot: Option<u32>,
     translate: (f32, f32),
@@ -993,12 +1013,17 @@ impl Element for Div {
         cx: &mut ElementContext,
     ) -> (LayoutId, Self::LayoutState) {
         // Layout children first, collecting their IDs on the engine's stack.
-        let mark = engine.begin_children();
+        let key = self
+            .semantic_key
+            .as_ref()
+            .map(UiKey::as_str)
+            .map(quark::stable_hash);
+        engine.begin_children(key);
         for child in self.children.iter_mut() {
             let id = child.request_layout(engine, cx);
             engine.push_child(id);
         }
-        let id = engine.finish_children(&self.base_style.layout, mark);
+        let id = engine.finish_children(&self.base_style.layout);
         (id, id)
     }
 
@@ -1015,6 +1040,15 @@ impl Element for Div {
         let translate = transform.translate;
         let bounds = offset_bounds(bounds, translate);
         let matrix = transform.matrix(bounds);
+        let presence = self
+            .presence
+            .zip(self.semantic_key.as_ref())
+            .and_then(|(transition, key)| cx.presence_prepaint(key, transition, bounds))
+            .map(|slot| (slot, slot.transform(bounds)));
+        let presence_matrix = presence.and_then(|(_, matrix)| matrix);
+        if let Some(matrix) = presence_matrix {
+            cx.push_transform(matrix);
+        }
         if let Some(key) = &self.semantic_key {
             cx.record_scroll_item(key, bounds);
         }
@@ -1116,9 +1150,13 @@ impl Element for Div {
         if z != 0 {
             cx.pop_z_index();
         }
+        if presence_matrix.is_some() {
+            cx.pop_transform();
+        }
 
         DivPrepaintState {
             hit,
+            presence,
             slot,
             translate,
             matrix,
@@ -1127,6 +1165,7 @@ impl Element for Div {
         }
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn paint(
         &mut self,
         bounds: Bounds,
@@ -1136,16 +1175,26 @@ impl Element for Div {
         scene: &mut Scene,
         cx: &mut ElementContext,
     ) {
+        let translate = prepaint_state.translate;
+        let bounds = offset_bounds(bounds, translate);
+        let presence = prepaint_state
+            .presence
+            .map(|(slot, _)| cx.begin_presence(slot, bounds, scene));
         // A hidden slot keeps its space and nothing else; its hit rows
         // were disabled with the hit test.
         if prepaint_state
             .slot
             .is_some_and(|slot| !cx.interaction_slot_visible(slot))
         {
+            if let Some(mark) = presence {
+                cx.end_presence(mark, scene);
+            }
             return;
         }
-        let translate = prepaint_state.translate;
-        let bounds = offset_bounds(bounds, translate);
+        let presence_matrix = prepaint_state.presence.and_then(|(_, matrix)| matrix);
+        if let Some(matrix) = presence_matrix {
+            cx.push_paint_transform(matrix);
+        }
         let scroll = prepaint_state.scroll;
         let (child_dx, child_dy) = (translate.0 - scroll.0, translate.1 - scroll.1);
         let hovered = prepaint_state.hit.is_some_and(|id| cx.is_hovered(id));
@@ -1546,6 +1595,12 @@ impl Element for Div {
         if z != 0 {
             scene.pop_z_index();
             cx.pop_z_index();
+        }
+        if presence_matrix.is_some() {
+            cx.pop_paint_transform();
+        }
+        if let Some(mark) = presence {
+            cx.end_presence(mark, scene);
         }
     }
 

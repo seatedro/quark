@@ -541,6 +541,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn restores_saved_placement_on_current_monitors() {
         use MonitorChoice::{Fallback, Saved};
         let on_right = record(&right(), (100.0, 50.0), (800.0, 600.0));

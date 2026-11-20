@@ -868,6 +868,7 @@ struct BlockPaint<'a> {
 /// The elements of one block at `rect`: quote bars and the list marker in
 /// the inset, then the content to the right of it. `spans` are the content
 /// spans with theme colors resolved.
+#[expect(clippy::too_many_lines, reason = "predates the line limit")]
 fn block_elements(
     block: &Block,
     spans: Option<Arc<[StyledSpan]>>,

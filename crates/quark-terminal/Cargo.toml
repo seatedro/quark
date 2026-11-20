@@ -47,3 +47,6 @@ name = "terminal_demo"
 # Its test module drives the terminal through `quark_app::testing`, with a
 # real shell on Linux and macOS.
 test = true
+
+[lints]
+workspace = true

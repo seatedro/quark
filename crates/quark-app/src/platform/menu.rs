@@ -337,6 +337,10 @@ impl MenuRole {
 /// An accelerator as native menus take it: modifiers and a W3C
 /// `KeyboardEvent.code` name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub(crate) struct Accelerator {
     pub(crate) command: bool,
     pub(crate) control: bool,

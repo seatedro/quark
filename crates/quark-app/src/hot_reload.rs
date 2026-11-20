@@ -74,6 +74,7 @@ mod inner {
                     continue;
                 }
 
+                // SAFETY: `jump_table` came from the dev server for this exact PID.
                 match unsafe { subsecond::apply_patch(jump_table) } {
                     Ok(()) => {
                         tracing::info!("hot reload: patch applied");

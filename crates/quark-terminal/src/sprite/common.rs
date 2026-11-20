@@ -44,6 +44,10 @@ pub(crate) enum Shade {
 
 /// Which quadrants of a cell are filled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub(crate) struct Quads {
     pub tl: bool,
     pub tr: bool,

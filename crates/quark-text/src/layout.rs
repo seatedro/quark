@@ -702,6 +702,7 @@ impl TextLayout {
         self.rebuild_with(fs, scratch, env, |_| true);
     }
 
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn rebuild_with(
         &mut self,
         fs: &mut FontSystem,

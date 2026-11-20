@@ -118,6 +118,7 @@ impl Button {
 }
 
 impl RenderOnce for Button {
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn render(self, cx: &ElementContext) -> AnyElement {
         let theme = cx.theme;
         let tc = &theme.colors;

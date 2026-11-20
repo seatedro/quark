@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use accesskit::NodeId;
-use quark::scene::SceneChunk;
+use quark::scene::{LayerTransform, SceneChunk};
 
 use crate::animation::AnimKey;
 
@@ -91,6 +91,8 @@ pub(super) struct PaintRecord {
     geometry_layout: Vec<Rect>,
     geometry_clip: Vec<Rect>,
     transitions: Vec<AnimKey>,
+    /// Presence rows the subtree painted, with their rects relative.
+    presence: Vec<(AnimKey, Rect)>,
     /// Scroll handles the subtree painted, viewports relative.
     scroll: Vec<ScrollWatch>,
 }
@@ -125,6 +127,7 @@ impl PaintRecord {
         self.geometry_layout.clear();
         self.geometry_clip.clear();
         self.transitions.clear();
+        self.presence.clear();
         self.scroll.clear();
     }
 
@@ -155,9 +158,9 @@ impl PaintRecord {
         }
     }
 
-    /// Whether every scroll handle the subtree painted is where it was.
-    pub(super) fn scroll_unchanged(&self) -> bool {
-        self.scroll.iter().all(ScrollWatch::unchanged)
+    /// The scroll handles the subtree painted.
+    pub(super) fn scroll(&self) -> &[ScrollWatch] {
+        &self.scroll
     }
 }
 
@@ -190,16 +193,16 @@ struct PaintMarks {
 #[derive(Clone, Copy)]
 struct PhaseStart {
     volatile: u32,
-    focus: u32,
     transitions: usize,
+    presence: usize,
 }
 
 impl PhaseStart {
     fn of(cx: &ElementContext) -> Self {
         Self {
             volatile: cx.volatile_reads(),
-            focus: cx.focus_reads(),
             transitions: cx.transition_keys().len(),
+            presence: cx.presence_painted_len(),
         }
     }
 }
@@ -216,7 +219,6 @@ pub(super) struct Recording {
     z: i32,
     phase: PhaseStart,
     volatile: u32,
-    focus_reads: u32,
     extent: Option<Rect>,
     paint: Option<PaintMarks>,
 }
@@ -238,20 +240,25 @@ impl Recording {
             z: cx.current_z_index(),
             phase: PhaseStart::of(cx),
             volatile: 0,
-            focus_reads: 0,
             extent: None,
             paint: None,
         }
     }
 
-    /// Close a phase: count what the subtree read and keep the transition
-    /// keys it touched.
+    /// Close a phase: count the clock-dependent requests the subtree made
+    /// and keep the transition keys and presence rows it touched. What it
+    /// read is tracked as signals.
     fn end_phase(&mut self, record: &mut PaintRecord, cx: &ElementContext) {
         self.volatile += cx.volatile_reads().wrapping_sub(self.phase.volatile);
-        self.focus_reads += cx.focus_reads().wrapping_sub(self.phase.focus);
         record
             .transitions
             .extend_from_slice(&cx.transition_keys()[self.phase.transitions..]);
+        let (ox, oy) = self.origin;
+        record.presence.extend(
+            cx.presence_painted_since(self.phase.presence)
+                .iter()
+                .map(|&(key, rect)| (key, rect.offset(-ox, -oy))),
+        );
     }
 
     pub(super) fn end_prepaint(&mut self, cx: &mut ElementContext) {
@@ -304,6 +311,7 @@ impl Recording {
 
     /// Copy the subtree's paint output into its row and decide whether the
     /// row may replay. `memo` replaces the row's measure memo when given.
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     pub(super) fn commit(
         mut self,
         scene: &Scene,
@@ -419,7 +427,6 @@ impl Recording {
             (Some(extent), Some((x, y))) => extent.offset(ox, oy).contains(x, y),
             _ => false,
         };
-        let focus = (self.focus_reads > 0).then_some((cx.focus, cx.focus_visible));
         let (scale, font) = (cx.scale_factor, cx.text.font_epoch());
         let accessibility = cx.accessibility_enabled();
         let row = self.row as usize;
@@ -428,11 +435,10 @@ impl Recording {
         cache.inputs[row] = EntryInputs {
             hash: self.hash,
             scale,
-            theme: cache.theme_generation,
             font,
             accessibility,
-            focus,
             reusable: complete && self.volatile == 0 && !pointer_inside,
+            recording: next_recording_id(),
         };
         cache.inherited[row] = Inherited {
             z: self.z,
@@ -510,11 +516,12 @@ pub(super) fn replay_prepaint(row: u32, bounds: Bounds, cx: &mut ElementContext)
     true
 }
 
-/// Replay `row`'s paint output at the boundary's origin. False when the
-/// inherited paint state differs from the recording's.
+/// Replay `row`'s paint output at the boundary's origin, through `layer`.
+/// False when the inherited paint state differs from the recording's.
 pub(super) fn replay_paint(
     row: u32,
     bounds: Bounds,
+    layer: LayerTransform,
     scene: &mut Scene,
     cx: &mut ElementContext,
 ) -> bool {
@@ -529,7 +536,7 @@ pub(super) fn replay_paint(
 
     // The recording stays as it is; the scene draws it by reference.
     if let Some(chunk) = record.scene.as_ref().filter(|chunk| !chunk.is_empty()) {
-        scene.chunk(chunk, [ox, oy]);
+        scene.chunk_with_layer(chunk, [ox, oy], layer);
     }
 
     let base = cx.semantic.nodes().len();
@@ -595,6 +602,7 @@ pub(super) fn replay_paint(
             .map(|r| replay_selectable(r, (ox, oy), transform)),
     );
     cx.keep_transition_keys(&record.transitions);
+    cx.replay_presence(&record.presence, (ox, oy));
 
     put_record(cx, row, record);
     true

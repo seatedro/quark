@@ -482,6 +482,7 @@ mod tests {
     // an alpha surface asked for where nothing could show through (an X11
     // ARGB visual without a compositor shows garbage).
     #[test]
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn a_background_request_resolves_to_what_the_desktop_can_show() {
         use FallbackReason::*;
         use MaterialScope::*;

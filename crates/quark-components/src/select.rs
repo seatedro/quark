@@ -359,7 +359,7 @@ impl RenderOnce for Select {
                     on_key={("tab", msg(SelectMsg::Close))}
                     on_key={("shift+tab", msg(SelectMsg::Close))}
                 }
-                @when {!self.disabled && (open || cx.focus == Some(self.focus))} {
+                @when {!self.disabled && (open || cx.focused() == Some(self.focus))} {
                     @for key in TYPE_AHEAD_KEYS {
                         on_key={(
                             key,

@@ -130,8 +130,8 @@ fn set_transient_for_exported() -> Option<SetTransientForExported> {
             c"gdk_wayland_window_set_transient_for_exported".as_ptr(),
         )
     };
-    // SAFETY: the symbol has this signature in every GTK 3 since 3.22.
     (!symbol.is_null())
+        // SAFETY: the symbol has this signature in every GTK 3 since 3.22.
         .then(|| unsafe { std::mem::transmute::<*mut c_void, SetTransientForExported>(symbol) })
 }
 

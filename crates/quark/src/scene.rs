@@ -185,10 +185,22 @@ impl Scene {
 
     /// Draw `chunk` with its origin at `offset`; see [`ChunkPrimitive`].
     pub fn chunk(&mut self, chunk: &Arc<SceneChunk>, offset: [f32; 2]) {
+        self.chunk_with_layer(chunk, offset, LayerTransform::IDENTITY);
+    }
+
+    /// [`Self::chunk`] drawn through `layer`: faded, moved, and scaled as
+    /// one group without changing the recording.
+    pub fn chunk_with_layer(
+        &mut self,
+        chunk: &Arc<SceneChunk>,
+        offset: [f32; 2],
+        layer: LayerTransform,
+    ) {
         self.push(Primitive::Chunk(ChunkPrimitive {
             chunk: Arc::clone(chunk),
             offset,
             scale: None,
+            layer,
         }));
     }
 
@@ -383,9 +395,14 @@ impl Primitive {
     }
 
     /// Push this primitive onto `out`, or a chunk's primitives as they
-    /// land, recursively.
+    /// land, recursively; a chunk drawn through a layer as that layer.
     fn expand_into(&self, out: &mut Vec<Primitive>) {
         match self {
+            Self::Chunk(chunk) if !chunk.layer.is_identity() => {
+                out.push(Primitive::LayerStart(chunk.layer_primitive()));
+                chunk.for_each_placed(|placed| placed.expand_into(out));
+                out.push(Primitive::LayerEnd);
+            }
             Self::Chunk(chunk) => chunk.for_each_placed(|placed| placed.expand_into(out)),
             other => out.push(other.clone()),
         }
@@ -497,7 +514,7 @@ impl SceneChunk {
         self.primitives.extend(primitives);
         self.has_layers = self.primitives.iter().any(|p| match p {
             Primitive::LayerStart(_) | Primitive::IsolateStart(_) => true,
-            Primitive::Chunk(chunk) => chunk.chunk.has_layers,
+            Primitive::Chunk(chunk) => chunk.chunk.has_layers || chunk.needs_layer(),
             _ => false,
         });
         self.generation += 1;
@@ -522,6 +539,10 @@ impl SceneChunk {
 /// then moved by its whole pixels. Two placements with the same fraction
 /// therefore snap every edge alike, and differ by exactly the difference
 /// of their whole pixels.
+///
+/// `layer` draws the placed chunk faded, moved, and scaled as one group,
+/// as a [`Primitive::LayerStart`] around it would, so an animated subtree
+/// changes how it shows without being recorded again.
 #[derive(Debug, Clone)]
 pub struct ChunkPrimitive {
     pub chunk: Arc<SceneChunk>,
@@ -530,9 +551,39 @@ pub struct ChunkPrimitive {
     /// The scale [`Primitive::to_physical`] converted the scene at; `None`
     /// while the scene is in logical points.
     pub scale: Option<f32>,
+    pub layer: LayerTransform,
 }
 
 impl ChunkPrimitive {
+    /// Whether drawing needs a layer: the chunk fades or scales. A layer
+    /// that only moves the chunk draws it in place, moved.
+    pub fn needs_layer(&self) -> bool {
+        !self.layer.moves_only()
+    }
+
+    /// The group `layer` draws the chunk through, in the scene's units.
+    pub fn layer_primitive(&self) -> LayerPrimitive {
+        let transform = self.layer.transform_at(self.offset);
+        LayerPrimitive {
+            opacity: self.layer.opacity,
+            transform: match self.scale {
+                Some(scale) => transform.in_scaled_space(scale),
+                None => transform,
+            },
+        }
+    }
+
+    /// How far a layer that only moves the chunk moves it, in the scene's
+    /// units: whole pixels once the scene is physical, as a layer drawn in
+    /// place moves its content.
+    pub fn layer_shift(&self) -> [f32; 2] {
+        let offset = [self.layer.offset_x, self.layer.offset_y];
+        match self.scale {
+            Some(scale) => offset.map(|o| (o * scale).round()),
+            None => offset,
+        }
+    }
+
     /// Call `f` with each of the chunk's primitives as it lands here.
     pub fn for_each_placed(&self, mut f: impl FnMut(Primitive)) {
         for primitive in &self.chunk.primitives {
@@ -572,11 +623,59 @@ impl ChunkPrimitive {
 }
 
 impl PartialEq for ChunkPrimitive {
-    /// The same recording at the same place.
+    /// The same recording at the same place, through the same layer.
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.chunk, &other.chunk)
             && self.offset == other.offset
             && self.scale == other.scale
+            && self.layer == other.layer
+    }
+}
+
+/// Opacity, offset, and scale a [`ChunkPrimitive`] is drawn through.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerTransform {
+    pub opacity: f32,
+    pub offset_x: f32,
+    pub offset_y: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    /// The point scaling keeps in place, relative to the chunk's origin.
+    pub origin: [f32; 2],
+}
+
+impl Default for LayerTransform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl LayerTransform {
+    pub const IDENTITY: Self = Self {
+        opacity: 1.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        scale_x: 1.0,
+        scale_y: 1.0,
+        origin: [0.0; 2],
+    };
+
+    pub fn is_identity(&self) -> bool {
+        self.moves_only() && self.offset_x == 0.0 && self.offset_y == 0.0
+    }
+
+    /// Opaque and unscaled: at most a move.
+    pub fn moves_only(&self) -> bool {
+        self.opacity >= 1.0 && self.scale_x == 1.0 && self.scale_y == 1.0
+    }
+
+    /// The map from a chunk placed at `at` to where the layer puts it:
+    /// scaled about `at + origin`, then moved by the offset.
+    pub fn transform_at(&self, at: [f32; 2]) -> Transform2D {
+        let pivot = (at[0] + self.origin[0], at[1] + self.origin[1]);
+        Transform2D::scale(self.scale_x, self.scale_y)
+            .around(pivot.0, pivot.1)
+            .then(Transform2D::translate(self.offset_x, self.offset_y))
     }
 }
 

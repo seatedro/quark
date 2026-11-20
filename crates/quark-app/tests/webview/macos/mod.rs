@@ -282,6 +282,58 @@ impl Smoke {
     fn webview_event(&mut self, event: WebViewEvent, cx: &mut EventContext) {
         let parent = cx.window().and_then(native::ns_window);
         match (self.step, event) {
+            (Step::Escape, WebViewEvent::Closed { view, reason }) if Some(view) == self.view => {
+                self.check("escape closes as the user", reason, WebCloseReason::User);
+                self.check(
+                    "the sheet is gone",
+                    parent.as_deref().and_then(native::sheet_title),
+                    None,
+                );
+                self.view = None;
+                self.next(cx);
+            }
+            (_, WebViewEvent::Closed { view, reason }) if Some(view) == self.view => {
+                if reason != WebCloseReason::Program {
+                    self.failures
+                        .push(format!("{:?}: closed by {reason:?}", self.step));
+                    return self.finish(cx);
+                }
+                self.view = None;
+                self.next(cx);
+            }
+            (Step::Getter | Step::Token | Step::Rejects | Step::Location, event) => {
+                self.handle_eval_event(event, parent.as_deref(), cx)
+            }
+            (Step::PasteFocus | Step::PasteRead | Step::NavigateDuring, event) => {
+                self.handle_paste_and_nav_event(event, parent.as_deref(), cx)
+            }
+            (Step::BadCert | Step::Redirect | Step::Popup | Step::Dark | Step::Escape, event) => {
+                self.handle_policy_event(event, parent.as_deref(), cx)
+            }
+            (Step::ProfileWrite | Step::ProfileRead | Step::ProfileEmpty, event) => {
+                self.handle_profile_event(event, cx)
+            }
+            (
+                _,
+                WebViewEvent::EvaluationFinished {
+                    result: Err(error), ..
+                },
+            ) => {
+                self.failures
+                    .push(format!("{:?}: evaluation failed: {error:?}", self.step));
+                self.finish(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_eval_event(
+        &mut self,
+        event: WebViewEvent,
+        parent: Option<&objc2_app_kit::NSWindow>,
+        cx: &mut EventContext,
+    ) {
+        match (self.step, event) {
             (Step::Getter, WebViewEvent::Opened { capabilities, .. }) => {
                 self.check(
                     "opened as a native sheet with a fresh store",
@@ -300,7 +352,7 @@ impl Smoke {
             (Step::Getter, WebViewEvent::PageLoadFinished { view, document, .. }) => {
                 self.check(
                     "the parent's attached sheet is the modal",
-                    parent.as_deref().and_then(native::sheet_title),
+                    parent.and_then(native::sheet_title),
                     Some(TITLE.to_owned()),
                 );
                 self.step = Step::Token;
@@ -352,6 +404,27 @@ impl Smoke {
             (Step::Location, WebViewEvent::EvaluationFinished { result: Ok(_), .. }) => {
                 self.location_step_done(cx);
             }
+            (
+                _,
+                WebViewEvent::EvaluationFinished {
+                    result: Err(error), ..
+                },
+            ) => {
+                self.failures
+                    .push(format!("{:?}: evaluation failed: {error:?}", self.step));
+                self.finish(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_paste_and_nav_event(
+        &mut self,
+        event: WebViewEvent,
+        parent: Option<&objc2_app_kit::NSWindow>,
+        cx: &mut EventContext,
+    ) {
+        match (self.step, event) {
             (Step::PasteFocus, WebViewEvent::EvaluationFinished { view, result, .. }) => {
                 self.check(
                     "an input has focus",
@@ -359,7 +432,7 @@ impl Smoke {
                     Ok(json!(true)),
                 );
                 self.pasteboard = Some(native::replace_pasteboard(PASTED));
-                let sent = parent.as_deref().is_some_and(native::command_v_in_sheet);
+                let sent = parent.is_some_and(native::command_v_in_sheet);
                 self.check("the sheet handles command-v", sent, true);
                 self.step = Step::PasteRead;
                 let document = self.document();
@@ -397,6 +470,27 @@ impl Smoke {
                 );
                 cx.webviews().close(view);
             }
+            (
+                _,
+                WebViewEvent::EvaluationFinished {
+                    result: Err(error), ..
+                },
+            ) => {
+                self.failures
+                    .push(format!("{:?}: evaluation failed: {error:?}", self.step));
+                self.finish(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_policy_event(
+        &mut self,
+        event: WebViewEvent,
+        parent: Option<&objc2_app_kit::NSWindow>,
+        cx: &mut EventContext,
+    ) {
+        match (self.step, event) {
             (
                 Step::BadCert,
                 WebViewEvent::NavigationFailed {
@@ -463,9 +557,25 @@ impl Smoke {
                 cx.webviews().close(view);
             }
             (Step::Escape, WebViewEvent::PageLoadFinished { .. }) => {
-                let sent = parent.as_deref().is_some_and(native::escape_in_sheet);
+                let sent = parent.is_some_and(native::escape_in_sheet);
                 self.check("escape reaches the sheet", sent, true);
             }
+            (
+                _,
+                WebViewEvent::EvaluationFinished {
+                    result: Err(error), ..
+                },
+            ) => {
+                self.failures
+                    .push(format!("{:?}: evaluation failed: {error:?}", self.step));
+                self.finish(cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_profile_event(&mut self, event: WebViewEvent, cx: &mut EventContext) {
+        match (self.step, event) {
             (Step::ProfileWrite, WebViewEvent::PageLoadFinished { view, document, .. }) => self
                 .evaluate(
                     cx,
@@ -507,25 +617,6 @@ impl Smoke {
                     Ok(json!([null, ""])),
                 );
                 cx.webviews().close(view);
-            }
-            (Step::Escape, WebViewEvent::Closed { view, reason }) if Some(view) == self.view => {
-                self.check("escape closes as the user", reason, WebCloseReason::User);
-                self.check(
-                    "the sheet is gone",
-                    parent.as_deref().and_then(native::sheet_title),
-                    None,
-                );
-                self.view = None;
-                self.next(cx);
-            }
-            (_, WebViewEvent::Closed { view, reason }) if Some(view) == self.view => {
-                if reason != WebCloseReason::Program {
-                    self.failures
-                        .push(format!("{:?}: closed by {reason:?}", self.step));
-                    return self.finish(cx);
-                }
-                self.view = None;
-                self.next(cx);
             }
             (
                 _,
@@ -691,6 +782,8 @@ mod native {
     pub fn replace_pasteboard(text: &str) -> Option<String> {
         let _ = MainThreadMarker::new();
         let pasteboard = NSPasteboard::generalPasteboard();
+        // SAFETY: an AppKit constant, declared with its type and never
+        // written.
         let kind = unsafe { NSPasteboardTypeString };
         let saved = pasteboard.stringForType(kind).map(|text| text.to_string());
         pasteboard.clearContents();
@@ -702,6 +795,7 @@ mod native {
         let pasteboard = NSPasteboard::generalPasteboard();
         pasteboard.clearContents();
         if let Some(text) = saved {
+            // SAFETY: as in `replace_pasteboard`.
             pasteboard.setString_forType(&NSString::from_str(&text), unsafe {
                 NSPasteboardTypeString
             });

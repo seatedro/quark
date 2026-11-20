@@ -25,3 +25,6 @@ quark-view-syntax = { path = "../quark-view-syntax" }
 # `{@sig}` integration coverage against the real `SignalStore`.
 quark = { path = "../quark" }
 trybuild = "1"
+
+[lints]
+workspace = true

@@ -42,6 +42,10 @@ pub enum HitIdentity {
 
 /// Modifier keys of a key binding or a click.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 pub struct Mods {
     pub cmd: bool,
     pub ctrl: bool,

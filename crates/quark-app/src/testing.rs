@@ -40,10 +40,14 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase};
 use winit::keyboard::{ModifiersState, NamedKey};
 
 use crate::runner::{HeadlessRunner, VirtualWindow};
+
+mod motion;
+
 use crate::{
     App, AppEvent, CloseReason, DesktopPoint, InputEvent, KeyChord, KeyKind, MonitorInfo,
     PlatformCapabilities, UiAdapter, UiApp, UiSender, WindowHandle, WindowPlacement,
 };
+pub use motion::MotionAudit;
 
 /// What the app asked of the window's IME, as the frames so far left it
 /// ([`UiTestHarness::ime`]).
@@ -153,6 +157,13 @@ impl<U: UiApp> UiTestHarness<U> {
     /// call [`Self::frame`] or ask for one from the app.
     pub fn app_mut(&mut self) -> &mut U {
         self.adapter.app_mut()
+    }
+
+    /// The app's signals. A write made through them shows after the next
+    /// frame, as with [`Self::app_mut`]; one the app makes in a callback
+    /// redraws by itself.
+    pub fn signals(&self) -> &quark::reactive::SignalStore {
+        self.adapter.signals()
     }
 
     // ---- Windows ---------------------------------------------------------

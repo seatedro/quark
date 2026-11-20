@@ -411,6 +411,7 @@ struct ToastVisuals {
 }
 
 impl RenderOnce for ToastVisuals {
+    #[expect(clippy::too_many_lines, reason = "predates the line limit")]
     fn render(self, cx: &ElementContext) -> AnyElement {
         let tc = &cx.theme.colors;
         let scale = cx.theme.metrics.ui_scale();

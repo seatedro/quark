@@ -12,3 +12,6 @@ fluent-langneg = "0.13"
 intl-memoizer = "0.5"
 sys-locale = "0.3"
 unic-langid = "0.9"
+
+[lints]
+workspace = true

@@ -1093,9 +1093,9 @@ mod tests {
         let started = std::time::Instant::now();
         drop(pty);
         assert!(started.elapsed() < Duration::from_secs(1), "closing waited");
-        // SAFETY: signal 0 only checks that the process exists; a zombie
-        // still does, so this waits for it to be reaped too.
         assert!(
+            // SAFETY: signal 0 only checks that the process exists; a
+            // zombie still does, so this waits for it to be reaped too.
             eventually(10, || unsafe { libc::kill(pid, 0) } != 0),
             "the program outlived its pty"
         );

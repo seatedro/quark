@@ -27,6 +27,8 @@ pub fn position_traffic_lights(window: &Window, left_margin: f32, target_center_
         return;
     };
 
+    // SAFETY: winit's AppKit handle points at its window's live content
+    // view, and `window` returns that view's NSWindow or nil.
     unsafe {
         let ns_view: *mut objc2::runtime::AnyObject = handle.ns_view.as_ptr().cast();
         let ns_view: &objc2::runtime::AnyObject = &*ns_view;
@@ -65,6 +67,7 @@ pub fn position_traffic_lights(window: &Window, left_margin: f32, target_center_
 }
 
 fn titlebar_height(ns_window: &NSWindow) -> f32 {
+    // SAFETY: `contentLayoutRect` is an NSWindow property of type NSRect.
     unsafe {
         let frame = ns_window.frame();
         let content_layout: objc2_foundation::NSRect =

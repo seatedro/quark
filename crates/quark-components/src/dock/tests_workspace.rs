@@ -1,8 +1,11 @@
 //! Hosts, transfers between them, and workspace persistence.
 
 use proptest::prelude::*;
+use quark_ui::element::{IntoAnyElement, div};
+use quark_ui::theme::Theme;
 
 use super::*;
+use crate::pane_tree::TabGroup;
 
 const LEFT: PanelId = PanelId(1);
 const CHAT: PanelId = PanelId(2);
@@ -830,7 +833,7 @@ proptest! {
                 hosts.get(i as usize % hosts.len().max(1)).copied()
             };
             let pick_live = |i: u8| {
-                let live: Vec<HostId> = dock.live.iter().map(|l| l.host).collect();
+                let live: Vec<HostId> = dock.hosts().into_iter().filter(|&h| dock.is_live(h)).collect();
                 live.get(i as usize % live.len().max(1)).copied()
             };
             let destination = |(host, pane), zone: u8| DockDestination { host, pane, zone: ZONES[zone as usize] };

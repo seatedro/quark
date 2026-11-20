@@ -91,6 +91,7 @@ The adapter redraws when:
 - a text field changes;
 - input moves a scroll handle;
 - the theme changes;
+- a callback wrote a signal (`cx.signals()`); every window redraws;
 - an animation or transition schedules a frame.
 
 Anything else (a message, a timer, a callback) needs
@@ -108,13 +109,22 @@ Anything else (a message, a timer, a callback) needs
 ## Signals
 
 `quark::reactive` is a signal store modeled on SolidJS, for state derived
-from other state. The `UiApp` path does not need it.
+from other state and for state views read inside cache boundaries.
 
 - `Signal<T>` is a copyable handle.
 - Memos recompute lazily; a memo whose new value equals the old stops the
   change spreading.
 - `#[derive(Store)]` turns a struct's fields into signals.
 - A write back into the store from inside `Signal::update` panics.
+- `store.batch(|| ..)` holds propagation back until the closure returns.
+- The adapter owns one store for the app: `UiContext::signals()` and
+  `ViewContext::signals()`. A write from a callback redraws every window
+  with no `request_redraw`.
+- A `reactive(key, |cx| ..)` boundary reads signals through `cx` and
+  rebuilds only when one of them changed; no inputs hash
+  ([Performance model](performance.md#signals-instead-of-a-hash)).
+- Focus and the theme are signals too (`ViewContext::window_signals()`),
+  and `ScrollHandle::offset()` read inside a boundary tracks the handle.
 - Propagation details and sharp edges:
   [crates/quark/ARCHITECTURE.md](../../crates/quark/ARCHITECTURE.md).
 

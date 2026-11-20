@@ -12,6 +12,10 @@ use crate::metrics::CellMetrics;
 
 /// A node: a circle, filled or not, with lines from it to some edges.
 #[derive(Debug, Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent flags, not states"
+)]
 struct BranchNode {
     up: bool,
     right: bool,

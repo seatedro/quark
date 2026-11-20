@@ -379,6 +379,7 @@ mod macos {
             })
             .collect();
         let items = NSArray::from_retained_slice(&items);
+        // SAFETY: NSObject's init, once, on a fresh allocation.
         let source: Retained<Source> = unsafe { msg_send![Source::alloc(mtm), init] };
         view.beginDraggingSessionWithItems_event_source(
             &items,

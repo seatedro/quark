@@ -12,9 +12,19 @@
 //!
 //! The adapter redraws only for a reason it can name: the
 //! hovered elements changed, focus moved, an action was dispatched, a text
-//! field changed, or the theme changed. Animations schedule their own
-//! frames, and an app that changes state elsewhere asks with
+//! field changed, the theme changed, or a callback wrote a signal in the
+//! app's [`SignalStore`] ([`UiContext::signals`]). Animations schedule
+//! their own frames, and an app that changes state elsewhere asks with
 //! `cx.window.request_redraw()`.
+//!
+//! # Signals
+//!
+//! State kept in [`Signal`](quark::reactive::Signal)s needs neither
+//! redraw requests nor inputs hashes. A write from any callback redraws
+//! every window, and a [`reactive`](quark_ui::element::reactive)
+//! boundary rebuilds only when a signal it read changed; the others
+//! replay. Focus and the theme are signals too ([`ViewContext::window_signals`]),
+//! so a boundary that paints a focus ring rebuilds only when focus moves.
 //!
 //! # Windows
 //!
@@ -52,7 +62,7 @@ use quark_ui::element::{
     AnyElement, Binding, CursorHint, Delivery, DragEnd, DragLocation, DragOutcome, DragSession,
     DropPolicy, DropTargets, ElementContext, ElementHandle, ElementHandles, HandoffError,
     ImeTarget, JumpChoice, JumpKey, LayoutSnapshot, Mods, TextHitContent, TextInputHitArea,
-    TooltipRegion, WheelEvent, render_element,
+    TooltipRegion, WheelEvent, WindowFrameState, WindowSignals, render_element,
 };
 use quark_ui::key_context::{KeyBindings, context_path};
 use quark_ui::text_input::{
@@ -283,6 +293,8 @@ pub struct HoveredTooltip {
 pub struct ViewContext<'a, 'f> {
     pub frame: &'a mut FrameContext<'f>,
     pub theme: &'a Theme,
+    signals: &'a SignalStore,
+    window_signals: WindowSignals,
     focus: Option<FocusId>,
     focus_visible: bool,
     animations: &'a mut AnimationTable,
@@ -296,6 +308,19 @@ impl ViewContext<'_, '_> {
     /// The window this frame is for.
     pub fn window_handle(&self) -> WindowHandle {
         self.frame.window_handle()
+    }
+
+    /// The app's signals, shared by every window. Read them inside a
+    /// [`reactive`](quark_ui::element::reactive) boundary's build, through
+    /// its context, so the boundary depends on them.
+    pub fn signals(&self) -> &SignalStore {
+        self.signals
+    }
+
+    /// The signals this window publishes its focus and theme through,
+    /// current for this frame.
+    pub fn window_signals(&self) -> WindowSignals {
+        self.window_signals
     }
 
     /// Where the elements of the window's last completed frame landed: the
@@ -375,6 +400,13 @@ impl UiContext<'_, '_> {
     /// arrive while no window is open.
     pub fn window_handle(&self) -> Option<WindowHandle> {
         self.windows.handle
+    }
+
+    /// The app's signals, shared by every window. A write redraws every
+    /// window once the callback returns; boundaries that did not read the
+    /// signal replay.
+    pub fn signals(&self) -> &SignalStore {
+        &self.shared.signals
     }
 
     /// Where the elements of the window's last completed frame landed, the
@@ -779,6 +811,8 @@ enum Redraw {
     Announce,
     /// Jump mode started, ended, or narrowed its labels.
     Jump,
+    /// A callback wrote a signal.
+    Signal,
 }
 
 /// Ask for a frame of `window`, or of the context's window without one.
@@ -952,6 +986,12 @@ impl<U: UiApp> UiAdapter<U> {
     /// The theme the next frame paints with.
     pub fn theme(&self) -> &Theme {
         &self.shared.theme
+    }
+
+    /// The app's signals, shared by every window; [`UiContext::signals`]
+    /// inside the app.
+    pub fn signals(&self) -> &SignalStore {
+        &self.shared.signals
     }
 
     /// A sender for [`UiApp::message`], for threads started before
@@ -1474,6 +1514,11 @@ impl<U: UiApp> UiAdapter<U> {
 
     fn after_input(&mut self, window_blurred: bool, cx: &mut EventContext) {
         self.flush_queued(cx);
+        // Signals are shared, so any window may show one; each frame clears
+        // the flag once painted.
+        if self.shared.signals.any_dirty() {
+            redraw_all(Redraw::Signal, cx);
+        }
         self.settle_focus(window_blurred, cx);
         // Focus the app moved in other windows from this callback.
         while let Some(window) = self.shared.refocused.pop() {
@@ -1595,7 +1640,14 @@ impl<U: UiApp> UiAdapter<U> {
         if self.win_handle == Some(window) {
             self.select(None);
         }
-        self.parked.retain(|(handle, _)| *handle != Some(window));
+        let signals = &self.shared.signals;
+        self.parked.retain_mut(|(handle, state)| {
+            let keep = *handle != Some(window);
+            if !keep {
+                state.element_cache.release_signals(signals);
+            }
+            keep
+        });
     }
 
     fn update_cursor(&mut self, cx: &mut EventContext) {
@@ -1776,12 +1828,24 @@ impl<U: UiApp> App for UiAdapter<U> {
             self.app.edit_text_in(window, target, command);
         }
         self.win.animations.tick(clock_ms);
+        // Before the view, so reactive code reads this frame's values.
+        self.win.animations.publish_signals(&self.shared.signals);
         #[cfg(feature = "devtools")]
         let view_started = std::time::Instant::now();
         let win = &mut *self.win;
+        let window_signals = win.element_cache.sync_signals(
+            &self.shared.signals,
+            WindowFrameState {
+                focus: win.focus,
+                focus_visible: win.focus_visible,
+                theme: &self.shared.theme,
+            },
+        );
         let mut root = self.app.view(&mut ViewContext {
             frame: cx,
             theme: &self.shared.theme,
+            signals: &self.shared.signals,
+            window_signals,
             focus: win.focus,
             focus_visible: win.focus_visible,
             animations: &mut win.animations,
@@ -1808,6 +1872,7 @@ impl<U: UiApp> App for UiAdapter<U> {
         .with_focus_visible(win.focus_visible)
         .with_clock(clock_ms)
         .with_animations(&mut win.animations)
+        .with_presence(&mut win.presence)
         .with_element_cache(&mut win.element_cache)
         .with_accessibility(accessibility)
         .with_input_frame(std::mem::take(&mut win.spare_input));
@@ -1842,39 +1907,9 @@ impl<U: UiApp> App for UiAdapter<U> {
             cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
         }
         let (scene, ime) = self.finish_frame(painted);
-        // The frame may have shown or hidden an element under a still
-        // pointer, such as an action revealed by the hover it painted; the
-        // hovered set it leaves behind no longer differs on the next move.
-        let cursor = cursor_icon(self.win.router.cursor_over(&self.win.hovered));
-        if cursor != self.win.cursor {
-            self.win.cursor = cursor;
-            cx.set_cursor(cursor);
-        }
-        // The frame may have moved a region under a still pointer.
-        let win = &mut *self.win;
-        if win
-            .tooltip
-            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
-        {
-            cx.request_frame();
-        }
-        self.forward_material_regions(cx);
-        if ime.reset {
-            cx.reset_ime();
-        }
-        if let Some(allowed) = ime.allowed {
-            cx.set_ime_allowed(allowed);
-        }
-        if let Some(caret) = ime.cursor_area {
-            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
-        }
-        if let Some(at_ms) = self
-            .win
-            .text_pointer
-            .next_autoscroll_ms(&self.win.text_areas)
-        {
-            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
-        }
+        // The frame painted every write so far.
+        self.shared.signals.clear_dirty();
+        self.apply_post_frame(ime, clock_ms, cx);
         #[cfg(feature = "devtools")]
         let frame = crate::devtools::PaintedFrame {
             router: &self.win.router,
@@ -2049,6 +2084,44 @@ impl<U: UiApp> UiAdapter<U> {
                 kind: r.kind,
             }));
         cx.set_material_regions(win.material_regions.clone());
+    }
+
+    /// Sync cursor, tooltip, material regions, IME state, and autoscroll
+    /// scheduling after a frame finishes painting.
+    fn apply_post_frame(&mut self, ime: ImeRequest, clock_ms: u64, cx: &mut FrameContext) {
+        // The frame may have shown or hidden an element under a still
+        // pointer, such as an action revealed by the hover it painted; the
+        // hovered set it leaves behind no longer differs on the next move.
+        let cursor = cursor_icon(self.win.router.cursor_over(&self.win.hovered));
+        if cursor != self.win.cursor {
+            self.win.cursor = cursor;
+            cx.set_cursor(cursor);
+        }
+        // The frame may have moved a region under a still pointer.
+        let win = &mut *self.win;
+        if win
+            .tooltip
+            .update(&win.spare_tooltip_regions, win.pointer, cx.elapsed())
+        {
+            cx.request_frame();
+        }
+        self.forward_material_regions(cx);
+        if ime.reset {
+            cx.reset_ime();
+        }
+        if let Some(allowed) = ime.allowed {
+            cx.set_ime_allowed(allowed);
+        }
+        if let Some(caret) = ime.cursor_area {
+            cx.set_ime_cursor_area(caret.x, caret.y, caret.width, caret.height);
+        }
+        if let Some(at_ms) = self
+            .win
+            .text_pointer
+            .next_autoscroll_ms(&self.win.text_areas)
+        {
+            cx.request_frame_in(Duration::from_millis(at_ms.saturating_sub(clock_ms)));
+        }
     }
 
     /// Keep `painted`'s input state for routing until the next frame, and

@@ -206,6 +206,8 @@ mod windows_overlay {
             .collect();
         // An all-zero mask: the color bitmap's alpha decides transparency.
         let mask = [0u8; OVERLAY_SIZE * OVERLAY_SIZE / 8];
+        // SAFETY: each bitmap reads a buffer of its size and depth that
+        // outlives the call, and is deleted once the icon has copied it.
         unsafe {
             let color = CreateBitmap(size, size, 1, 32, Some(bgra.as_ptr().cast()));
             let mask = CreateBitmap(size, size, 1, 1, Some(mask.as_ptr().cast()));
